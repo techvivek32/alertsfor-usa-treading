@@ -59,12 +59,16 @@ npm install --omit=dev
 cat > .env <<'EOF'
 FINNHUB_KEY=PASTE_YOUR_FINNHUB_KEY_HERE
 PORT=3000
+ANTHROPIC_API_KEY=PASTE_YOUR_ANTHROPIC_KEY_HERE
 ENABLE_CLAUDE=0
 EOF
 ```
 
-Use the same Finnhub key from your PC's local `.env` (free key from
-https://finnhub.io). Without this, the app still runs but live ticks are disabled.
+- `FINNHUB_KEY` — same free key from your PC's `.env` (https://finnhub.io). Without it, live ticks are disabled.
+- `ANTHROPIC_API_KEY` — enables Claude best-trade + smart news on the server. Needs
+  API credits at console.anthropic.com → Plans & Billing (~$5 lasts a long time at
+  these models). Leave it blank to run on keyword sentiment (free). `ENABLE_CLAUDE=0`
+  tells it not to look for the local CLI.
 
 ## 5. Start it with pm2 (keeps it alive + auto-start on reboot)
 
@@ -133,8 +137,10 @@ npm install --omit=dev
 pm2 restart tradescope
 ```
 
-## Want Claude (best-trade + smart news) on the VPS?
+## Claude (best-trade + smart news) on the VPS
 
-The Max-subscription CLI can't run on the VPS. To enable Claude there you'd add a
-paid Anthropic **API key** (~$1–3/mo for this usage) and wire an API-based path —
-ask and I'll add it. Until then it runs great with keyword sentiment.
+The Max-subscription CLI can't run on a server, so the VPS uses the Anthropic
+**API** instead (already wired in). Just set `ANTHROPIC_API_KEY` in `.env` (step 4b)
+and add credits at console.anthropic.com → Plans & Billing. Cheap models are used by
+default (Haiku); roughly a few dollars a month at this volume. No key = keyword
+sentiment, app still works.

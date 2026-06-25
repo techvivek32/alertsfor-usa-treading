@@ -7,6 +7,7 @@ const os = require("os");
 const fs = require("fs");
 const { spawn } = require("child_process");
 const WebSocket = require("ws");
+const Anthropic = require("@anthropic-ai/sdk");
 const YahooFinance = require("yahoo-finance2").default;
 const { RSI, EMA, ATR, MACD, ADX } = require("technicalindicators");
 
@@ -374,8 +375,42 @@ const CLAUDE_PATH = `${process.env.PATH}${path.delimiter}${path.join(
 // so it skips Claude cleanly and uses keyword sentiment instead.
 const ENABLE_CLAUDE = process.env.ENABLE_CLAUDE !== "0";
 
-// Generic: send a prompt to `claude -p`, parse one JSON object from the output.
-function claudeJSON(prompt, model, timeoutMs) {
+// --- Paid Anthropic API path (for cloud/VPS, where the Max CLI login is absent) ---
+// Key goes in .env as ANTHROPIC_API_KEY (never committed). Cheap models by default.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY || "";
+const SENTIMENT_MODEL = process.env.CLAUDE_SENTIMENT_MODEL || "claude-haiku-4-5";
+const BEST_MODEL = process.env.CLAUDE_BEST_MODEL || "claude-haiku-4-5";
+let anthropic = null;
+if (ANTHROPIC_API_KEY) {
+  try { anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY }); }
+  catch (_) { anthropic = null; }
+}
+
+async function apiJSON(prompt, model, maxTokens) {
+  if (!anthropic) return null;
+  try {
+    const msg = await anthropic.messages.create({
+      model: model || "claude-haiku-4-5",
+      max_tokens: maxTokens || 500,
+      messages: [{ role: "user", content: prompt }],
+    });
+    const text = (msg.content || [])
+      .filter((b) => b.type === "text").map((b) => b.text).join("");
+    const m = text.replace(/```json|```/g, "").match(/\{[\s\S]*\}/);
+    return m ? JSON.parse(m[0]) : null;
+  } catch (_) { return null; }
+}
+
+// Router: prefer the FREE Max CLI on your PC; use the PAID API on a server/VPS.
+async function claudeJSON(prompt, opts = {}) {
+  const forceCli = process.env.ENABLE_CLAUDE === "1";
+  if (anthropic && !forceCli) return apiJSON(prompt, opts.apiModel, opts.maxTokens);
+  if (ENABLE_CLAUDE) return cliJSON(prompt, opts.cliModel, opts.timeoutMs);
+  return null;
+}
+
+// CLI path: send a prompt to `claude -p`, parse one JSON object from the output.
+function cliJSON(prompt, model, timeoutMs) {
   return new Promise((resolve) => {
     if (!ENABLE_CLAUDE) return resolve(null);
     const args = ["-p"];
@@ -415,7 +450,7 @@ async function claudeSentiment(symbol, headlines) {
     `${symbol} headlines, output ONE line of JSON and nothing else: ` +
     `{"sentiment":"Bullish|Bearish|Neutral","reason":"<max 12 words, plain text>"}.\n` +
     `Headlines:\n${headlines.map((h) => "- " + h).join("\n")}`;
-  const o = await claudeJSON(prompt, "haiku", 30000);
+  const o = await claudeJSON(prompt, { apiModel: SENTIMENT_MODEL, cliModel: "haiku", maxTokens: 150, timeoutMs: 30000 });
   return o && o.sentiment ? { sentiment: o.sentiment, reason: o.reason || "" } : null;
 }
 
@@ -441,7 +476,7 @@ async function claudeBestTrade(candidates) {
     `{"pick":"<SYMBOL>","confidence":"High|Medium|Low","thesis":"<2-3 short sentences on why this is the best trade>",` +
     `"action":"<concrete: buy the stock at entry, or buy which specific option>","risk":"<the single biggest risk, one sentence>"}`;
 
-  const o = await claudeJSON(prompt, null, 45000); // default model for best reasoning
+  const o = await claudeJSON(prompt, { apiModel: BEST_MODEL, cliModel: null, maxTokens: 600, timeoutMs: 45000 });
   return o && o.pick ? o : null;
 }
 
