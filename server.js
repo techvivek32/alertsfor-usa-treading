@@ -343,7 +343,14 @@ async function analyzeOptions(symbol, refPrice) {
       premium: c.lastPrice ?? null,
     }));
 
-  return { underlyingPrice: +(+price).toFixed(2), pcr, flow, suggestion, unusual };
+  // Don't recommend buying a CALL when the options flow is bearish — contradictory.
+  let note = "";
+  if (flow === "Bearish") {
+    suggestion = null;
+    note = "Options flow is bearish — a call buy is not advised here; consider waiting.";
+  }
+
+  return { underlyingPrice: +(+price).toFixed(2), pcr, flow, suggestion, unusual, note };
 }
 
 // ---- News + sentiment (Phase B) ----
@@ -549,86 +556,153 @@ async function analyzeNews(symbol) {
   };
 }
 
-// ---- Alert manager: scan, keep top 5, refresh every 10 min ----
-const MIN_SCORE = 55; // out of 100
-const ALERT_REFRESH_MS = 10 * 60 * 1000; // 10 minutes
+// ---- Alert manager: positions that live until target/stop is hit ----------
+// Issue up to 5 alerts. Each behaves like an open position: it STAYS until the
+// live price hits its target (win) or stop (loss). Then it's closed, recorded,
+// and the best fresh setup takes its place. No time-based churn.
+const MIN_SCORE = 55;                 // out of 100
+const MAX_ALERTS = 5;
+const MONITOR_MS = 15 * 1000;         // check open positions every 15s
+const BACKFILL_MS = 5 * 60 * 1000;    // when slots stay empty, re-scan at most this often
 let activeAlerts = [];
+let closedAlerts = [];                // recently resolved (newest first), capped
+let stats = { wins: 0, losses: 0 };
 let alertsUpdatedAt = null;
 let alertsScanned = 0;
-let alertsRefreshing = false;
-let bestTrade = null; // Claude's single best-trade pick across the candidates
+let bestTrade = null;
+let managing = false;
+let alertSeq = 0;
+let lastBackfillAt = 0;
 
-async function refreshAlertSet() {
-  if (alertsRefreshing) return;
-  alertsRefreshing = true;
-  try {
-    const analyses = [];
-    const CHUNK = 6; // modest concurrency — fast, but won't hammer Yahoo
-    for (let i = 0; i < WATCHLIST.length; i += CHUNK) {
-      const batch = WATCHLIST.slice(i, i + CHUNK);
-      const results = await Promise.all(
-        batch.map(async (symbol) => {
-          try {
-            const { candles, timeframe } = await fetchCandles(symbol);
-            return analyze(symbol, candles, timeframe);
-          } catch (_) {
-            return null;
-          }
-        })
-      );
-      results.forEach((a) => { if (a) analyses.push(a); });
-    }
-    analyses.sort((a, b) => b.score - a.score);
-    const top = analyses
-      .filter((a) => a.passFilter && a.score >= MIN_SCORE)
-      .slice(0, 5); // keep the best 5
+// Current price: prefer a fresh Finnhub tick, else the Yahoo cache.
+function currentPrice(symbol) {
+  const t = liveTicks[symbol];
+  if (t && Date.now() - t.ts < 120000) return t.price;
+  const c = yahooCache[symbol];
+  return c && c.price != null ? c.price : null;
+}
 
-    // enrich each with F&O idea + news (in parallel)
-    await Promise.all(
-      top.map(async (a) => {
-        const [opt, news] = await Promise.all([
-          analyzeOptions(a.symbol, a.price).catch(() => null),
-          analyzeNews(a.symbol).catch(() => null),
-        ]);
-        a.options = opt;
-        a.news = news;
-        a.generatedAt = new Date().toISOString();
+// Build a fresh alert/position from an analysis — entry = live price right now.
+async function issueAlert(a) {
+  const px = currentPrice(a.symbol) || a.price;
+  const atr = (a.entry - a.stop) / 1.5;       // recover ATR from the analysis
+  const entry = +px.toFixed(2);
+  const stop = +(entry - 1.5 * atr).toFixed(2);
+  const target = +(entry + 2.5 * atr).toFixed(2);
+  const risk = entry - stop;
+  const [opt, news] = await Promise.all([
+    analyzeOptions(a.symbol, entry).catch(() => null),
+    analyzeNews(a.symbol).catch(() => null),
+  ]);
+  return {
+    id: ++alertSeq,
+    symbol: a.symbol,
+    timeframe: a.timeframe,
+    score: a.score,
+    rsi: a.rsi, adx: a.adx, relVol: a.relVol, atrPct: a.atrPct,
+    reasons: a.reasons,
+    entry, target, stop,
+    targetPct: +(((target - entry) / entry) * 100).toFixed(2),
+    stopPct: +(((stop - entry) / entry) * 100).toFixed(2),
+    riskReward: risk > 0 ? +((target - entry) / risk).toFixed(2) : a.riskReward,
+    options: opt,
+    news,
+    status: "open",
+    openedAt: new Date().toISOString(),
+  };
+}
+
+// Scan the watchlist, return qualifying setups ranked by score.
+async function scanCandidates() {
+  const analyses = [];
+  const CHUNK = 6;
+  for (let i = 0; i < WATCHLIST.length; i += CHUNK) {
+    const batch = WATCHLIST.slice(i, i + CHUNK);
+    const results = await Promise.all(
+      batch.map(async (symbol) => {
+        try {
+          const { candles, timeframe } = await fetchCandles(symbol);
+          return analyze(symbol, candles, timeframe);
+        } catch (_) { return null; }
       })
     );
+    results.forEach((a) => { if (a) analyses.push(a); });
+  }
+  alertsScanned = analyses.length;
+  return analyses
+    .filter((a) => a.passFilter && a.score >= MIN_SCORE)
+    .sort((a, b) => b.score - a.score);
+}
 
-    activeAlerts = top;
-    alertsScanned = analyses.length;
-    alertsUpdatedAt = new Date().toISOString();
-    console.log(
-      `Alerts refreshed: ${top.length} active [${top.map((a) => `${a.symbol}:${a.score}`).join(", ")}]`
+// Close positions whose target/stop has been hit (only while the market moves).
+function monitorPositions() {
+  if (!isUsMarketOpen()) return [];
+  const closed = [];
+  for (const a of activeAlerts) {
+    const px = currentPrice(a.symbol);
+    if (px == null) continue;
+    if (px >= a.target) a.status = "target";
+    else if (px <= a.stop) a.status = "stop";
+    else continue;
+    a.closedAt = new Date().toISOString();
+    a.closePrice = +px.toFixed(2);
+    a.resultPct = +(((px - a.entry) / a.entry) * 100).toFixed(2);
+    if (a.status === "target") stats.wins++; else stats.losses++;
+    closed.push(a);
+  }
+  if (closed.length) {
+    activeAlerts = activeAlerts.filter((a) => a.status === "open");
+    closedAlerts = [...closed, ...closedAlerts].slice(0, 12);
+    closed.forEach((a) =>
+      console.log(`Alert ${a.symbol} ${a.status === "target" ? "✅ TARGET" : "🛑 STOP"} @ ${a.closePrice} (${a.resultPct}%)`)
     );
+  }
+  return closed;
+}
 
-    // Claude weighs everything and names the single best trade
-    if (top.length) {
-      const pick = await claudeBestTrade(top).catch(() => null);
-      if (pick) {
-        bestTrade = { ...pick, at: new Date().toISOString() };
-        console.log(`Claude best trade: ${pick.pick} (${pick.confidence})`);
-      }
-    } else {
-      bestTrade = null;
-    }
+// Fill empty slots with the best fresh setups (excluding ones already open).
+async function backfillAlerts() {
+  if (managing || activeAlerts.length >= MAX_ALERTS) return;
+  managing = true;
+  lastBackfillAt = Date.now();
+  try {
+    const need = MAX_ALERTS - activeAlerts.length;
+    const held = new Set(activeAlerts.map((a) => a.symbol));
+    const candidates = (await scanCandidates()).filter((a) => !held.has(a.symbol)).slice(0, need);
+    const fresh = (await Promise.all(candidates.map((a) => issueAlert(a).catch(() => null)))).filter(Boolean);
+    activeAlerts.push(...fresh);
+    activeAlerts.sort((a, b) => b.score - a.score);
+    alertsUpdatedAt = new Date().toISOString();
+    if (activeAlerts.length) {
+      const pick = await claudeBestTrade(activeAlerts).catch(() => null);
+      if (pick) bestTrade = { ...pick, at: new Date().toISOString() };
+    } else bestTrade = null;
+    console.log(
+      `Alerts: ${activeAlerts.length} open [${activeAlerts.map((a) => a.symbol + ":" + a.score).join(", ")}] · W:${stats.wins} L:${stats.losses}`
+    );
   } finally {
-    alertsRefreshing = false;
+    managing = false;
   }
 }
 
-// ---- API: cached top-5 alerts (stable for 10 min, served instantly) ----
+// One management tick: resolve any target/stop hits, then top up empty slots.
+async function manageAlerts() {
+  const closed = monitorPositions();
+  const needTopUp = activeAlerts.length < MAX_ALERTS;
+  if (closed.length || (needTopUp && Date.now() - lastBackfillAt > BACKFILL_MS)) {
+    await backfillAlerts();
+  }
+}
+
+// ---- API: live positions ----
 app.get("/api/alerts", (req, res) => {
   res.json({
     updated: alertsUpdatedAt,
-    refreshEverySec: ALERT_REFRESH_MS / 1000,
-    nextRefreshInSec: alertsUpdatedAt
-      ? Math.max(0, Math.round((new Date(alertsUpdatedAt).getTime() + ALERT_REFRESH_MS - Date.now()) / 1000))
-      : null,
     minScore: MIN_SCORE,
     scanned: alertsScanned,
     marketOpen: isUsMarketOpen(),
+    stats,
+    closed: closedAlerts.slice(0, 6),
     bestTrade,
     alerts: activeAlerts,
   });
@@ -837,9 +911,9 @@ app.get("/api/quotes", (req, res) => {
   res.json({ updated: new Date().toISOString(), quotes });
 });
 
-// Build the first alert set on boot, then refresh every 10 minutes
-refreshAlertSet();
-setInterval(refreshAlertSet, ALERT_REFRESH_MS);
+// Fill positions on boot, then manage them (resolve hits + top up) every 15s
+manageAlerts();
+setInterval(manageAlerts, MONITOR_MS);
 
 // Backtest the strategy shortly after boot, then every 6 hours
 setTimeout(runBacktest, 8000);
