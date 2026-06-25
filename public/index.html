@@ -107,6 +107,11 @@
   .alert .a-top{ display:flex; align-items:center; gap:9px; }
   .alert .sym{ font-size:22px; font-weight:900; letter-spacing:.5px; }
   .alert .tag{ font-size:11px; background:var(--green); color:#042; padding:3px 10px; border-radius:999px; font-weight:800; }
+  .dirbadge{ font-size:11px; padding:3px 11px; border-radius:999px; font-weight:800; }
+  .dir-call{ background:var(--green); color:#042; }
+  .dir-put{ background:var(--red); color:#2a0808; }
+  .fno-contract{ font-size:15px; font-weight:800; margin:10px 0 3px; }
+  .fno-meta{ font-size:12px; color:var(--muted); margin-bottom:4px; }
   .alert .tf{ margin-left:auto; color:var(--muted); font-size:12px; }
   .score-row{ display:flex; align-items:center; gap:11px; margin:12px 0 4px; }
   .score-num{ font-size:24px; font-weight:900; min-width:62px; }
@@ -242,10 +247,16 @@
       <div><span class="k">Entry</span> suggested buy price · <b style="color:var(--green)">Target</b> = sell for profit · <b style="color:var(--red)">Stop</b> = exit to limit loss.</div>
       <div><span class="k">R:R</span> Risk:Reward — "1 : 1.67" means you risk 1 to make 1.67. Higher is better.</div>
       <div><span class="k">RSI</span> momentum (50–70 = healthy, &gt;70 = overbought) · <span class="k" style="min-width:auto">ADX</span> trend strength (&gt;25 = strong).</div>
-      <div><span class="k">F&amp;O</span> a specific call option to trade · <span class="k" style="min-width:auto">News</span> Claude's read on the latest headlines.</div>
+      <div><span class="k">News</span> Claude's read on the latest headlines.</div>
     </div>
   </details>
   <div class="alerts" id="alerts" style="margin-top:14px"></div>
+
+  <div class="sec">
+    <h2>🎯 F&amp;O Radar — Calls &amp; Puts</h2>
+    <div class="desc">A separate options engine, independent of the stock alerts: bullish setups → <b style="color:var(--green)">BUY CALL</b>, bearish setups → <b style="color:var(--red)">BUY PUT</b>. Ranked by trend + options flow. <span id="fnoinfo"></span></div>
+  </div>
+  <div class="alerts" id="fno-radar"></div>
 
   <div class="disclaimer">
     ⚠️ <b>Disclaimer:</b> These are technical + AI signals from free market data — <b>NOT financial advice and NOT a profit guarantee.</b>
@@ -356,7 +367,7 @@ async function loadAlerts(){
   }
   alertLevels = {};
   if(!data.alerts.length){
-    root.innerHTML = `<div class="empty">😴 No setup is strong enough right now (score ≥ ${data.minScore}/100 + real movement).<br>Scanned ${data.scanned} stocks — staying patient beats forcing weak trades. New ones appear automatically.</div>`;
+    root.innerHTML = `<div class="empty">😴 No quality <b>long</b> setup right now — the market may be broadly weak, or signals don't agree (trend + options flow + news).<br>That's by design: forcing weak longs is exactly how trades end up underwater. 👉 Check the <b>F&amp;O Radar</b> below for put ideas. New longs appear automatically.</div>`;
     return;
   }
   root.innerHTML = data.alerts.map(a => {
@@ -395,10 +406,51 @@ async function loadAlerts(){
         <span title="Typical price move size (volatility)">Move <b>${a.atrPct}%</b></span>
       </div>
       <div class="reasons">${a.reasons.map(r=>`<span>${r}</span>`).join("")}</div>
-      ${renderFno(a.options)}
       ${renderNews(a.news)}
     </div>`;
   }).join("");
+}
+
+async function loadFno(){
+  const root = document.getElementById("fno-radar");
+  const info = document.getElementById("fnoinfo");
+  if(!root) return;
+  try{
+    const res = await fetch("/api/fno");
+    const data = await res.json();
+    if(info) info.textContent = data.marketOpen===false ? "· 🌙 market closed" : `· ${(data.ideas||[]).length} ideas`;
+    if(!data.ideas || !data.ideas.length){
+      root.innerHTML = `<div class="empty">🔍 No high-confluence options idea right now — needs a decisive direction with options flow agreeing with the trend. New ones appear automatically.</div>`;
+      return;
+    }
+    root.innerHTML = data.ideas.map(renderFnoIdea).join("");
+  }catch(_){}
+}
+
+function renderFnoIdea(i){
+  const isCall = i.direction === "CALL";
+  const col = isCall ? "var(--green)" : "var(--red)";
+  const c = i.contract, p = i.plan;
+  const flowClass = i.flowDir === "bullish" ? "flow-bull" : i.flowDir === "bearish" ? "flow-bear" : "flow-neut";
+  const unusual = (i.unusual && i.unusual.length)
+    ? `<div class="fno-unusual">🔥 Unusual ${isCall?'call':'put'} activity: ${i.unusual.map(u=>`<span>$${u.strike}${u.side} vol ${u.volume} / OI ${u.openInterest}</span>`).join("")}</div>` : "";
+  return `
+  <div class="alert" style="border-left-color:${col}">
+    <div class="a-top"><span class="sym">${i.symbol}</span>
+      <span class="dirbadge ${isCall?'dir-call':'dir-put'}">${isCall?'BUY CALL':'BUY PUT'}</span>
+      <span class="tf">score ${i.score}</span></div>
+    <div class="fno-contract">📑 ${c.expiry} · $${c.strike} ${c.type} @ $${fmt(c.premium)}</div>
+    <div class="fno-meta">Breakeven $${fmt(c.breakeven)} (${c.breakevenPct>0?'+':''}${c.breakevenPct}%) · IV ${c.iv ?? '–'}% · Vol ${c.volume} / OI ${c.openInterest}</div>
+    <div style="margin:8px 0"><span class="flow-badge ${flowClass}">Flow: ${i.flow}${i.pcr!=null?` (PCR ${i.pcr})`:''}</span></div>
+    <div class="levels">
+      <div class="level entry"><div class="lbl">Stock now</div><div class="val num">${fmt(i.underlyingPrice)}</div></div>
+      <div class="level target"><div class="lbl">${isCall?'Target ▲':'Target ▼'}</div><div class="val num">${fmt(p.targetRef)}</div><div class="pct" style="color:${col}">${p.targetPct>0?'+':''}${p.targetPct}%</div></div>
+      <div class="level stop"><div class="lbl">Stop</div><div class="val num">${fmt(p.stopRef)}</div><div class="pct" style="color:var(--muted)">${p.stopPct>0?'+':''}${p.stopPct}%</div></div>
+    </div>
+    <div class="rr">⚖️ underlying Risk:Reward = 1 : ${p.riskReward}</div>
+    <div class="reasons">${i.reasons.map(r=>`<span>${r}</span>`).join("")}</div>
+    ${unusual}
+  </div>`;
 }
 
 function renderBest(bt){
@@ -520,7 +572,7 @@ async function loadQuotes(){
 }
 
 async function refreshAll(){
-  try { await Promise.all([loadCharts(), loadAlerts(), loadBacktest()]); }
+  try { await Promise.all([loadCharts(), loadAlerts(), loadBacktest(), loadFno()]); }
   catch(e){ document.getElementById("status").textContent = "Error: " + e.message; }
 }
 

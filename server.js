@@ -143,6 +143,18 @@ function analyze(symbol, candles, timeframe) {
   const relVol = baseAvgVol ? recentAvgVol / baseAvgVol : 0;
   const atrPct = (atr / price) * 100;               // typical move size, in %
 
+  // ---- Entry-quality signals (anti-chase + fresh momentum on completed bars) ----
+  const ema9_prev = ema9arr[ema9arr.length - 2] ?? ema9;
+  const lastBar = candles[n - 2] || candles[n - 1];  // last COMPLETED bar (n-1 is forming)
+  const closeStrength = (lastBar.close - lastBar.low) / Math.max(lastBar.high - lastBar.low, 1e-9);
+  const prevClose = lastBar.close, prevHigh = lastBar.high;
+  const cc = closes.slice(0, -1); const L = cc.length - 1; // completed-bar closes
+  const extPct = ((price - ema9) / ema9) * 100;      // distance above the fast EMA, %
+  const m1 = L >= 1 && cc[L] > cc[L - 1];             // last completed close rising
+  const m2 = price > ema9 && ema9 > ema9_prev;        // price above a RISING fast EMA
+  const m3 = closeStrength >= 0.5;                    // last bar closed in upper half
+  const freshOK = (m1 + m2 + m3) >= 2;               // 2-of-3 — confirmed, not chasing
+
   // ---- Weighted 0-100 Opportunity Score ----
   const breakdown = {};
   const reasons = [];
@@ -151,7 +163,7 @@ function analyze(symbol, candles, timeframe) {
   // 1) TREND (max 30)
   let trend = 0;
   if (ema9 > ema21) trend += 10;
-  if (price > ema50) trend += 6;
+  if (price > ema50 && ema21 > ema50) trend += 6; // require the EMA stack
   if (macd.MACD > macd.signal) trend += 8;
   if (adx.adx >= 20 && adx.pdi > adx.mdi) trend += 6;
   trend = Math.min(trend, 30);
@@ -161,9 +173,10 @@ function analyze(symbol, candles, timeframe) {
 
   // 2) MOMENTUM (max 20)
   let mom = 0;
-  if (rsi >= 50 && rsi <= 68) mom += 12;
-  else if (rsi > 68) mom += 3;               // overbought, less room
-  else if (rsi >= 40 && rsi < 50) mom += 6;
+  if (rsi >= 52 && rsi <= 65) mom += 12;      // healthy zone, room to run
+  else if (rsi > 65 && rsi <= 70) mom += 6;   // getting hot
+  else if (rsi >= 42 && rsi < 52) mom += 6;
+  // rsi > 70 -> 0 (overbought)
   if (macd.histogram > (macdPrev.histogram ?? 0)) mom += 8;  // momentum rising
   mom = Math.min(mom, 20);
   breakdown.momentum = mom; score += mom;
@@ -179,13 +192,14 @@ function analyze(symbol, candles, timeframe) {
   breakdown.volume = vol; score += vol;
   if (vol >= 10) reasons.push(`Volume ${relVol.toFixed(1)}x average`);
 
-  // 4) BREAKOUT (max 15)
+  // 4) BREAKOUT (max 15) — reward a CONTROLLED breakout, not an extended chase
   let brk = 0;
-  if (price >= recentHigh) brk = 15;
-  else if (price >= recentHigh * 0.997) brk = 11;
-  else if (price >= recentHigh * 0.99) brk = 6;
+  if (price >= recentHigh * 0.995 && price <= recentHigh * 1.002) brk = 15; // poised at the high
+  else if (price >= recentHigh * 0.985 && price < recentHigh * 0.995) brk = 10; // coiling below
+  else if (price > recentHigh * 1.005) brk = 4; // already extended (anti-chase gate handles worst)
+  if (price >= recentHigh && relVol < 1.2) brk = Math.min(brk, 6); // breakout needs participation
   breakdown.breakout = brk; score += brk;
-  if (brk >= 11) reasons.push("Breaking recent high");
+  if (brk >= 10) reasons.push("Breaking out");
 
   // 5) VOLATILITY QUALITY (max 15) — enough movement to be worth it, not crazy
   let vq = 0;
@@ -194,15 +208,18 @@ function analyze(symbol, candles, timeframe) {
   else if (atrPct > 4 && atrPct <= 7) vq = 7;       // very volatile = extra risk
   breakdown.volatility = vq; score += vq;
 
+  if (freshOK) { score += 5; reasons.push("Fresh upward momentum"); } // confirmed entry
+
   score = Math.round(score);
 
-  // ---- Noise / liquidity filter (your "no $1-change" rule) ----
-  // Gate on: does it MOVE enough to be worth trading, and does it actually trade.
-  // (Volume surge is a scoring signal, not a gate — it's time-of-day biased.)
+  // ---- Noise / liquidity / anti-chase filter ----
+  // Move enough + actually trades + NOT over-extended + confirmed micro-momentum.
   const MIN_ATR_PCT = 0.3;          // skip dead movers (tiny range = noise)
   const tooQuiet = atrPct < MIN_ATR_PCT;
   const liquid = completedVols.length >= 5; // it has real trading history
-  const passFilter = !tooQuiet && liquid;
+  // over-extended = too far above EMA9 (ATR-scaled), overbought, or chasing the high
+  const extended = extPct > 1.5 * atrPct || rsi > 70 || price > recentHigh * 1.005;
+  const passFilter = !tooQuiet && liquid && !extended && freshOK;
 
   // ---- Entry / Target / Stop ----
   const entry = price;
@@ -222,6 +239,13 @@ function analyze(symbol, candles, timeframe) {
     breakdown,
     reasons,
     passFilter,
+    extended,
+    freshOK,
+    extPct: +extPct.toFixed(2),
+    atr: +atr.toFixed(4),         // raw ATR for structure-aware stops
+    prevClose: +prevClose.toFixed(2),
+    prevHigh: +prevHigh.toFixed(2),
+    ema9: +ema9.toFixed(2),
     entry: +entry.toFixed(2),
     target,
     stop,
@@ -305,52 +329,74 @@ async function analyzeOptions(symbol, refPrice) {
     } catch (_) {}
   }
   const calls = chain.calls || [];
+  const puts = chain.puts || [];
+  const expiryStr = new Date(chain.expirationDate).toISOString().slice(0, 10);
 
-  // 3) Suggested CALL: near-ATM with some liquidity
-  const liquid = calls.filter((c) => (c.volume || 0) + (c.openInterest || 0) >= 50);
-  const pool = liquid.length ? liquid : calls;
-  const sug = pool
-    .slice()
-    .sort((a, b) => Math.abs(a.strike - price) - Math.abs(b.strike - price))[0];
-  let suggestion = null;
-  if (sug) {
-    const premium = sug.lastPrice || ((sug.bid || 0) + (sug.ask || 0)) / 2 || 0;
-    const breakeven = sug.strike + premium;
-    suggestion = {
-      type: "CALL",
-      expiry: new Date(chain.expirationDate).toISOString().slice(0, 10),
-      strike: sug.strike,
-      premium: +premium.toFixed(2),
-      bid: sug.bid ?? null,
-      ask: sug.ask ?? null,
-      iv: sug.impliedVolatility ? Math.round(sug.impliedVolatility * 100) : null,
-      volume: sug.volume || 0,
-      openInterest: sug.openInterest || 0,
+  // 3) Signed flow direction (used by both the confluence gate and the F&O engine)
+  const flowDir = pcr == null ? "neutral" : pcr < 0.8 ? "bullish" : pcr <= 1.15 ? "neutral" : "bearish";
+  const clamp = (lo, hi, v) => Math.max(lo, Math.min(hi, v));
+  const flowScore = pcr == null ? 0 : +clamp(-1, 1, (1 - pcr) / 0.5).toFixed(2);
+
+  const atmCall = calls.slice().sort((a, b) => Math.abs(a.strike - price) - Math.abs(b.strike - price))[0];
+  const atmIV = atmCall && atmCall.impliedVolatility ? Math.round(atmCall.impliedVolatility * 100) : null;
+  const callOI = calls.reduce((s, c) => s + (c.openInterest || 0), 0);
+  const putOI = puts.reduce((s, p) => s + (p.openInterest || 0), 0);
+
+  // 4) Pick a liquid near-ATM contract for either side (CALL = slightly OTM up, PUT = down)
+  function pickContract(side) {
+    const list = side === "CALL" ? calls : puts;
+    if (!list.length) return null;
+    const liq = list.filter((c) => (c.volume || 0) + (c.openInterest || 0) >= 50);
+    const pool = liq.length ? liq : list;
+    let c;
+    if (side === "CALL") {
+      c = pool.filter((x) => x.strike >= price).sort((a, b) => a.strike - b.strike)[0];
+    } else {
+      c = pool.filter((x) => x.strike <= price).sort((a, b) => b.strike - a.strike)[0];
+    }
+    if (!c) c = pool.slice().sort((a, b) => Math.abs(a.strike - price) - Math.abs(b.strike - price))[0];
+    if (!c) return null;
+    const premium = c.lastPrice || ((c.bid || 0) + (c.ask || 0)) / 2 || 0;
+    const breakeven = side === "CALL" ? c.strike + premium : c.strike - premium;
+    return {
+      type: side, expiry: expiryStr, strike: c.strike,
+      premium: +premium.toFixed(2), bid: c.bid ?? null, ask: c.ask ?? null,
+      iv: c.impliedVolatility ? Math.round(c.impliedVolatility * 100) : null,
+      volume: c.volume || 0, openInterest: c.openInterest || 0,
       breakeven: +breakeven.toFixed(2),
       breakevenPct: +(((breakeven - price) / price) * 100).toFixed(2),
     };
   }
 
-  // 4) Unusual call activity (fresh money): volume > openInterest and sizable
-  const unusual = calls0
-    .filter((c) => (c.volume || 0) > Math.max(c.openInterest || 0, 200))
-    .sort((a, b) => (b.volume || 0) - (a.volume || 0))
-    .slice(0, 3)
-    .map((c) => ({
-      strike: c.strike,
-      volume: c.volume || 0,
-      openInterest: c.openInterest || 0,
-      premium: c.lastPrice ?? null,
-    }));
+  // 5) Unusual activity (fresh money: volume > OI), for calls and puts
+  const unusualOf = (list, label) =>
+    (list || [])
+      .filter((c) => (c.volume || 0) > Math.max(c.openInterest || 0, 200))
+      .sort((a, b) => (b.volume || 0) - (a.volume || 0))
+      .slice(0, 3)
+      .map((c) => ({ strike: c.strike, side: label, volume: c.volume || 0, openInterest: c.openInterest || 0, premium: c.lastPrice ?? null }));
+  const unusualCalls = unusualOf(calls0, "C");
+  const unusualPuts = unusualOf(puts0, "P");
 
-  // Don't recommend buying a CALL when the options flow is bearish — contradictory.
-  let note = "";
-  if (flow === "Bearish") {
-    suggestion = null;
-    note = "Options flow is bearish — a call buy is not advised here; consider waiting.";
-  }
+  return {
+    underlyingPrice: +(+price).toFixed(2),
+    pcr, flow, flowDir, flowScore, bearishFlow: flowDir === "bearish",
+    atmIV, callOI, putOI,
+    makeCall: () => pickContract("CALL"),
+    makePut: () => pickContract("PUT"),
+    unusualCalls, unusualPuts,
+  };
+}
 
-  return { underlyingPrice: +(+price).toFixed(2), pcr, flow, suggestion, unusual, note };
+// Cache options per symbol ~90s so the alert confluence gate and the F&O engine
+// share one fetch instead of hammering Yahoo.
+const _optCache = {};
+async function getOptions(symbol, price) {
+  const c = _optCache[symbol];
+  if (c && Date.now() - c.ts < 90000) return c.data;
+  const data = await analyzeOptions(symbol, price).catch(() => null);
+  _optCache[symbol] = { data, ts: Date.now() };
+  return data;
 }
 
 // ---- News + sentiment (Phase B) ----
@@ -563,10 +609,10 @@ async function analyzeNews(symbol) {
 const MIN_SCORE = 55;                 // out of 100
 const MAX_ALERTS = 5;
 const MONITOR_MS = 15 * 1000;         // check open positions every 15s
-const BACKFILL_MS = 5 * 60 * 1000;    // when slots stay empty, re-scan at most this often
+const BACKFILL_MS = 2 * 60 * 1000;    // when slots stay empty, re-scan at most this often
 let activeAlerts = [];
 let closedAlerts = [];                // recently resolved (newest first), capped
-let stats = { wins: 0, losses: 0 };
+let stats = { wins: 0, losses: 0, scratches: 0 };
 let alertsUpdatedAt = null;
 let alertsScanned = 0;
 let bestTrade = null;
@@ -582,33 +628,46 @@ function currentPrice(symbol) {
   return c && c.price != null ? c.price : null;
 }
 
-// Build a fresh alert/position from an analysis — entry = live price right now.
+// Build a fresh alert/position from an analysis. Better entry timing (don't chase,
+// shift toward a small pullback), structure-aware stop, dynamic target.
+// Returns null to SKIP this cycle if the live fill looks bad (backfill retries).
 async function issueAlert(a) {
+  const atr = a.atr || (a.entry - a.stop) / 1.5;
   const px = currentPrice(a.symbol) || a.price;
-  const atr = (a.entry - a.stop) / 1.5;       // recover ATR from the analysis
-  const entry = +px.toFixed(2);
-  const stop = +(entry - 1.5 * atr).toFixed(2);
-  const target = +(entry + 2.5 * atr).toFixed(2);
+  // fill-validity: skip if price popped since the scan, slipped below the last
+  // completed bar, or below the recent swing low (would open straight into weakness)
+  if (px > a.price + 0.4 * atr || px < a.prevClose || px < a.recentLow) return null;
+
+  // pullback-shifted entry: cap any chase at +0.25 ATR, then sit 0.25 ATR below —
+  // makes the live "now" start at/above entry far more often (same R:R).
+  const entry = +(Math.min(px, a.price + 0.25 * atr) - 0.25 * atr).toFixed(2);
+
+  // structure-aware stop (just under the swing low), clamped to 0.8–2.2 ATR risk
+  let stop = Math.min(a.recentLow - 0.25 * atr, entry - 1.5 * atr);
+  if (entry - stop > 2.2 * atr) stop = entry - 2.2 * atr;
+  if (entry - stop < 0.8 * atr) stop = entry - 1.0 * atr;
+  stop = +stop.toFixed(2);
   const risk = entry - stop;
-  const [opt, news] = await Promise.all([
-    analyzeOptions(a.symbol, entry).catch(() => null),
-    analyzeNews(a.symbol).catch(() => null),
-  ]);
+  const target = +(entry + 1.8 * risk).toFixed(2); // keeps R:R ~1.8
+
+  const news = a.news !== undefined ? a.news : await analyzeNews(a.symbol).catch(() => null);
+
   return {
     id: ++alertSeq,
     symbol: a.symbol,
     timeframe: a.timeframe,
-    score: a.score,
+    score: a.finalScore != null ? Math.round(a.finalScore) : a.score,
     rsi: a.rsi, adx: a.adx, relVol: a.relVol, atrPct: a.atrPct,
     reasons: a.reasons,
     entry, target, stop,
     targetPct: +(((target - entry) / entry) * 100).toFixed(2),
     stopPct: +(((stop - entry) / entry) * 100).toFixed(2),
-    riskReward: risk > 0 ? +((target - entry) / risk).toFixed(2) : a.riskReward,
-    options: opt,
+    riskReward: risk > 0 ? +((target - entry) / risk).toFixed(2) : 1.8,
     news,
     status: "open",
     openedAt: new Date().toISOString(),
+    // exit-management tracking
+    atr, stop0: stop, recentLow: a.recentLow, movedBE: false, stopMoves: 0, ticks: 0,
   };
 }
 
@@ -629,33 +688,84 @@ async function scanCandidates() {
     results.forEach((a) => { if (a) analyses.push(a); });
   }
   alertsScanned = analyses.length;
-  return analyses
+  const ranked = analyses
     .filter((a) => a.passFilter && a.score >= MIN_SCORE)
-    .sort((a, b) => b.score - a.score);
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8); // only enrich the top 8 (cheap)
+
+  // Confluence gate: technical + options flow + news must agree. VETO a bullish
+  // setup when options flow OR news is bearish (this is the CAT fix).
+  await Promise.all(
+    ranked.map(async (a) => {
+      const [opt, news] = await Promise.all([
+        getOptions(a.symbol, a.price),
+        analyzeNews(a.symbol).catch(() => null),
+      ]);
+      a.options = opt;
+      a.news = news;
+      a.veto = (opt && opt.flowDir === "bearish") || (news && news.sentiment === "Bearish");
+      let conf = 0;
+      if (opt) conf += opt.flowDir === "bullish" ? 8 : opt.flowDir === "bearish" ? -12 : 0;
+      if (news) conf += news.sentiment === "Bullish" ? 6 : news.sentiment === "Bearish" ? -14 : 0;
+      a.confluence = conf;
+      a.finalScore = a.score + conf;
+    })
+  );
+
+  const passTech = analyses.filter((a) => a.passFilter && a.score >= MIN_SCORE).length;
+  const out = ranked
+    .filter((a) => !a.veto && a.finalScore >= 58) // ~3 over MIN_SCORE — still fills slots
+    .sort((a, b) => b.finalScore - a.finalScore);
+  console.log(`scan funnel: ${analyses.length} scanned → ${passTech} passed tech gate → top8 vetoed:${ranked.filter((a) => a.veto).length} → ${out.length} issued`);
+  return out;
 }
 
-// Close positions whose target/stop has been hit (only while the market moves).
+// Manage open positions: move to breakeven, trail winners, and close on
+// target / stop / time-stop. Runs only while the market actually moves.
+const TIME_STOP_TICKS = 1200; // ~5 market hours at one 15s tick each
 function monitorPositions() {
   if (!isUsMarketOpen()) return [];
   const closed = [];
   for (const a of activeAlerts) {
     const px = currentPrice(a.symbol);
     if (px == null) continue;
-    if (px >= a.target) a.status = "target";
-    else if (px <= a.stop) a.status = "stop";
-    else continue;
+    const R = a.entry - a.stop0; // initial risk per share
+
+    // breakeven once +1R, then chandelier-trail once +1.5R (never lower a stop)
+    if (R > 0 && !a.movedBE && px >= a.entry + 1.0 * R) {
+      a.stop = Math.max(a.stop, +(a.entry + 0.05 * a.atr).toFixed(2));
+      a.movedBE = true; a.stopMoves++;
+    }
+    if (R > 0 && px >= a.entry + 1.5 * R) {
+      const trail = +(px - 1.5 * a.atr).toFixed(2);
+      if (trail > a.stop) { a.stop = trail; a.stopMoves++; }
+    }
+
+    let resolved = null;
+    if (px >= a.target) resolved = "target";
+    else if (px <= a.stop) resolved = "stop";
+    else {
+      a.ticks++;
+      if (a.ticks >= TIME_STOP_TICKS && px < a.entry + 0.5 * R) resolved = "timeout";
+    }
+    if (!resolved) continue;
+
+    a.status = resolved;
     a.closedAt = new Date().toISOString();
     a.closePrice = +px.toFixed(2);
     a.resultPct = +(((px - a.entry) / a.entry) * 100).toFixed(2);
-    if (a.status === "target") stats.wins++; else stats.losses++;
+    if (resolved === "timeout") stats.scratches++;
+    else if (a.resultPct >= 0) stats.wins++;     // target, or stop after breakeven/trail
+    else stats.losses++;
     closed.push(a);
   }
   if (closed.length) {
     activeAlerts = activeAlerts.filter((a) => a.status === "open");
     closedAlerts = [...closed, ...closedAlerts].slice(0, 12);
-    closed.forEach((a) =>
-      console.log(`Alert ${a.symbol} ${a.status === "target" ? "✅ TARGET" : "🛑 STOP"} @ ${a.closePrice} (${a.resultPct}%)`)
-    );
+    closed.forEach((a) => {
+      const tag = a.status === "target" ? "✅ TARGET" : a.status === "timeout" ? "⏱️ TIMEOUT" : (a.resultPct >= 0 ? "🔒 LOCKED" : "🛑 STOP");
+      console.log(`Alert ${a.symbol} ${tag} @ ${a.closePrice} (${a.resultPct}%)`);
+    });
   }
   return closed;
 }
@@ -692,6 +802,10 @@ async function manageAlerts() {
   if (closed.length || (needTopUp && Date.now() - lastBackfillAt > BACKFILL_MS)) {
     await backfillAlerts();
   }
+  // F&O radar — independent throttled scan (every 90s in market hours, +1 warm on boot)
+  if (Date.now() - lastFnoScanAt > 90000 && (isUsMarketOpen() || lastFnoScanAt === 0)) {
+    scanFno(); // fire and forget
+  }
 }
 
 // ---- API: live positions ----
@@ -705,6 +819,134 @@ app.get("/api/alerts", (req, res) => {
     closed: closedAlerts.slice(0, 6),
     bestTrade,
     alerts: activeAlerts,
+  });
+});
+
+// ---- F&O Radar: a SEPARATE, bidirectional options engine -------------------
+// Independent of the long-only stock alerts. For each symbol it scores BOTH a
+// bullish (CALL) and bearish (PUT) case from technicals + options flow, then
+// issues the decisive winner. So bearish names get PUT ideas, not forced calls.
+let fnoIdeas = [];
+let fnoUpdatedAt = null;
+let fnoScanning = false;
+let lastFnoScanAt = 0;
+
+function scoreFnoDirection(symbol, candles, opt) {
+  const closes = candles.map((c) => c.close);
+  const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
+  const vols = candles.map((c) => c.volume || 0);
+  const n = closes.length;
+  if (n < 30) return null;
+  const price = closes[n - 1];
+  const last = (a) => a[a.length - 1];
+  const ema9 = last(EMA.calculate({ period: 9, values: closes }));
+  const ema21 = last(EMA.calculate({ period: 21, values: closes }));
+  const ema50 = last(EMA.calculate({ period: 50, values: closes })) || ema21;
+  const rsi = last(RSI.calculate({ period: 14, values: closes }));
+  const atr = last(ATR.calculate({ period: 14, high: highs, low: lows, close: closes })) || price * 0.01;
+  const macdArr = MACD.calculate({ values: closes, fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, SimpleMAOscillator: false, SimpleMASignalLine: false });
+  const macd = last(macdArr) || { MACD: 0, signal: 0, histogram: 0 };
+  const macdPrev = macdArr[macdArr.length - 2] || macd;
+  const adx = last(ADX.calculate({ high: highs, low: lows, close: closes, period: 14 })) || { adx: 0, pdi: 0, mdi: 0 };
+  const atrPct = (atr / price) * 100;
+  const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+  const cv = vols.slice(0, -1).filter((v) => v > 0);
+  const relVol = avg(cv.slice(-11, -3)) ? avg(cv.slice(-3)) / avg(cv.slice(-11, -3)) : 0;
+  const histRising = macd.histogram > (macdPrev.histogram ?? 0);
+  const extPct = ((price - ema9) / ema9) * 100;
+  const flowDir = opt.flowDir;
+
+  let bull = 0; const br = [];
+  if (ema9 > ema21 && price > ema50) { bull += 25; br.push("Uptrend (EMA stack)"); }
+  if (macd.MACD > macd.signal && histRising) { bull += 20; br.push("MACD rising"); }
+  if (adx.adx >= 20 && adx.pdi > adx.mdi) { bull += 15; br.push(`ADX ${adx.adx.toFixed(0)} (buyers)`); }
+  if (rsi >= 50 && rsi <= 65) bull += 15;
+  if (flowDir === "bullish" || (opt.unusualCalls && opt.unusualCalls.length)) { bull += 15; br.push("Bullish call flow"); }
+  if (Math.abs(extPct) <= 1.2 * atrPct && price >= ema9) bull += 10;
+
+  let bear = 0; const pr = [];
+  if (ema9 < ema21 && price < ema50) { bear += 25; pr.push("Downtrend (EMA stack)"); }
+  if (macd.MACD < macd.signal && !histRising) { bear += 20; pr.push("MACD falling"); }
+  if (adx.adx >= 20 && adx.mdi > adx.pdi) { bear += 15; pr.push(`ADX ${adx.adx.toFixed(0)} (sellers)`); }
+  if (rsi >= 35 && rsi <= 50) bear += 15;
+  if (flowDir === "bearish" || (opt.unusualPuts && opt.unusualPuts.length) || (opt.pcr != null && opt.pcr >= 1.3)) { bear += 15; pr.push("Bearish put flow"); }
+  if (Math.abs(extPct) <= 1.2 * atrPct && price <= ema9) bear += 10;
+
+  const liquid = atrPct >= 0.3 && cv.length >= 5 && (opt.callOI + opt.putOI) >= 500 && opt.atmIV != null;
+  let direction = "NONE", score = 0, reasons = [];
+  if (liquid) {
+    if (bull >= bear && bull >= 60 && bull - bear >= 12) { direction = "CALL"; score = bull; reasons = br; }
+    else if (bear > bull && bear >= 60 && bear - bull >= 12) { direction = "PUT"; score = bear; reasons = pr; }
+  }
+  // Never issue a direction that CONTRADICTS the options flow (the user's rule,
+  // both ways): no CALL when flow is bearish, no PUT when flow is bullish.
+  if ((direction === "CALL" && flowDir === "bearish") || (direction === "PUT" && flowDir === "bullish")) {
+    direction = "NONE"; score = 0; reasons = [];
+  }
+  return {
+    symbol, direction, score: Math.round(score), bullScore: bull, bearScore: bear,
+    rsi: +rsi.toFixed(1), adx: +adx.adx.toFixed(0), atrPct: +atrPct.toFixed(2), relVol: +relVol.toFixed(2),
+    pcr: opt.pcr, flow: opt.flow, flowDir, atmIV: opt.atmIV, price: +price.toFixed(2), atr, reasons,
+  };
+}
+
+async function scanFno() {
+  if (fnoScanning) return;
+  fnoScanning = true;
+  lastFnoScanAt = Date.now();
+  try {
+    const ideas = [];
+    const CHUNK = 6;
+    for (let i = 0; i < WATCHLIST.length; i += CHUNK) {
+      const batch = WATCHLIST.slice(i, i + CHUNK);
+      const res = await Promise.all(
+        batch.map(async (sym) => {
+          try {
+            const { candles } = await fetchCandles(sym);
+            const px = candles[candles.length - 1].close;
+            const opt = await getOptions(sym, px);
+            if (!opt || opt.callOI + opt.putOI < 500) return null;
+            const d = scoreFnoDirection(sym, candles, opt);
+            if (!d || d.direction === "NONE" || d.score < 60) return null;
+            const contract = d.direction === "CALL" ? opt.makeCall() : opt.makePut();
+            if (!contract) return null;
+            const price = d.price, atr = d.atr;
+            const plan = d.direction === "CALL"
+              ? { entryRef: +price.toFixed(2), stopRef: +(price - 1.5 * atr).toFixed(2), targetRef: +(price + 2.5 * atr).toFixed(2) }
+              : { entryRef: +price.toFixed(2), stopRef: +(price + 1.5 * atr).toFixed(2), targetRef: +(price - 2.5 * atr).toFixed(2) };
+            plan.targetPct = +(((plan.targetRef - price) / price) * 100).toFixed(2);
+            plan.stopPct = +(((plan.stopRef - price) / price) * 100).toFixed(2);
+            plan.riskReward = +(Math.abs(plan.targetRef - price) / Math.max(Math.abs(price - plan.stopRef), 1e-9)).toFixed(2);
+            const unusual = d.direction === "CALL" ? opt.unusualCalls : opt.unusualPuts;
+            const flowAgrees = (d.direction === "CALL" && opt.flowDir === "bullish") || (d.direction === "PUT" && opt.flowDir === "bearish");
+            const rankScore = d.score + (flowAgrees ? 8 : 0) + Math.min(10, (unusual ? unusual.length : 0) * 3) - (opt.atmIV > 80 ? 6 : 0);
+            return {
+              symbol: sym, direction: d.direction, score: d.score, rankScore: Math.round(rankScore),
+              flow: opt.flow, pcr: opt.pcr, flowDir: opt.flowDir, atmIV: opt.atmIV,
+              underlyingPrice: price, rsi: d.rsi, adx: d.adx, atrPct: d.atrPct,
+              reasons: d.reasons, contract, plan, unusual,
+            };
+          } catch (_) { return null; }
+        })
+      );
+      res.forEach((x) => { if (x) ideas.push(x); });
+    }
+    ideas.sort((a, b) => b.rankScore - a.rankScore);
+    fnoIdeas = ideas.slice(0, 6);
+    fnoUpdatedAt = new Date().toISOString();
+    console.log(`F&O: ${fnoIdeas.length} ideas [${fnoIdeas.map((i) => i.symbol + ":" + i.direction).join(", ")}]`);
+  } finally {
+    fnoScanning = false;
+  }
+}
+
+app.get("/api/fno", (req, res) => {
+  res.json({
+    updated: fnoUpdatedAt,
+    marketOpen: isUsMarketOpen(),
+    scanned: WATCHLIST.length,
+    ideas: fnoIdeas,
   });
 });
 
