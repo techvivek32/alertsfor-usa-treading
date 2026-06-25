@@ -237,12 +237,6 @@
   <div class="charts" id="charts"></div>
 
   <div class="sec">
-    <h2>💹 Live Prices <span class="chip">● REAL-TIME</span></h2>
-    <div class="desc">Your watchlist, every price ticking live. Tiles flash green/red as trades happen.</div>
-  </div>
-  <div class="ticker" id="ticker"></div>
-
-  <div class="sec">
     <h2>📊 Strategy Reality Check</h2>
     <div class="desc">The honest scoreboard — this strategy tested on ~400 days of real history. No hype, just numbers.</div>
   </div>
@@ -532,7 +526,6 @@ async function loadQuotes(){
     const res = await fetch("/api/quotes");
     const data = await res.json();
     if(!data.quotes) return;
-    const ticker = document.getElementById("ticker");
     let liveCount = 0;
     data.quotes.forEach(q => {
       const el = document.getElementById("price-"+q.symbol);
@@ -567,33 +560,7 @@ async function loadQuotes(){
         const favorable = fl.dir === "CALL" ? q.price >= fl.ref : q.price <= fl.ref;
         fnonow.className = "val num " + (favorable ? "chg-up" : "chg-down");
       }
-      const id = "tile-"+q.symbol;
-      let tile = document.getElementById(id);
-      if(!tile){
-        tile = document.createElement("div");
-        tile.className = "tile"; tile.id = id;
-        tile.innerHTML = `<div class="t-sym">${q.symbol}</div>
-          <div class="t-price num"></div><div class="t-chg"></div>
-          <div class="t-live" style="display:none"></div>`;
-        ticker.appendChild(tile);
-      }
-      if(q.price != null){
-        const up = (q.changePct ?? 0) >= 0;
-        tile.querySelector(".t-price").textContent = fmt(q.price);
-        const chg = tile.querySelector(".t-chg");
-        chg.textContent = `${up?'▲':'▼'} ${q.changePct ?? 0}%`;
-        chg.className = "t-chg " + (up?'chg-up':'chg-down');
-        tile.querySelector(".t-live").style.display = q.live ? "block" : "none";
-        if(q.live) liveCount++;
-        const prev = lastPrice[q.symbol];
-        if(prev != null && q.price !== prev){
-          tile.classList.remove("flash-up","flash-down");
-          void tile.offsetWidth;
-          tile.classList.add(q.price > prev ? "flash-up" : "flash-down");
-          setTimeout(()=>tile.classList.remove("flash-up","flash-down"), 400);
-        }
-        lastPrice[q.symbol] = q.price;
-      }
+      if(q.live) liveCount++;
     });
     document.getElementById("status").textContent = `Live · ${liveCount} ticking · ${new Date().toLocaleTimeString()}`;
   } catch(_){}
