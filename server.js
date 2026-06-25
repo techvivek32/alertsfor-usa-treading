@@ -897,12 +897,14 @@ async function scanFno() {
   lastFnoScanAt = Date.now();
   try {
     const ideas = [];
+    const heldLong = new Set(activeAlerts.map((a) => a.symbol)); // don't duplicate stock alerts
     const CHUNK = 6;
     for (let i = 0; i < WATCHLIST.length; i += CHUNK) {
       const batch = WATCHLIST.slice(i, i + CHUNK);
       const res = await Promise.all(
         batch.map(async (sym) => {
           try {
+            if (heldLong.has(sym)) return null; // it's already a long alert — keep F&O separate
             const { candles } = await fetchCandles(sym);
             const px = candles[candles.length - 1].close;
             const opt = await getOptions(sym, px);
