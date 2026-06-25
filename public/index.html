@@ -26,10 +26,16 @@
 
   /* Header */
   header{
-    position:sticky; top:0; z-index:30; display:flex; align-items:center; justify-content:space-between;
-    gap:12px; padding:13px 22px; background:rgba(11,14,20,.82); backdrop-filter:blur(12px);
-    border-bottom:1px solid var(--border);
+    position:sticky; top:0; z-index:30; padding:13px 22px;
+    background:rgba(11,14,20,.92); backdrop-filter:blur(12px); border-bottom:1px solid var(--border);
   }
+  .hrow{ display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .tabs{ display:flex; gap:8px; margin-top:12px; }
+  .tab{ background:var(--panel); color:var(--muted); border:1px solid var(--border); cursor:pointer;
+    font-size:14px; font-weight:700; padding:9px 20px; border-radius:11px; transition:all .15s; }
+  .tab:hover{ color:var(--text); border-color:var(--border-2); }
+  .tab.active{ background:linear-gradient(180deg,#1d2740,#131a28); color:#fff; border-color:var(--accent);
+    box-shadow:0 4px 16px rgba(77,159,255,.22); }
   .brand{ display:flex; align-items:center; gap:12px; }
   .brand .logo{ font-size:24px; filter:drop-shadow(0 0 8px rgba(77,159,255,.4)); }
   .brand h1{ font-size:17px; margin:0; font-weight:800; letter-spacing:.3px; }
@@ -199,20 +205,27 @@
 </head>
 <body>
 <header>
-  <div class="brand">
-    <span class="logo">📈</span>
-    <div>
-      <h1>TradeScope</h1>
-      <div class="tag">US market · live alerts</div>
+  <div class="hrow">
+    <div class="brand">
+      <span class="logo">📈</span>
+      <div>
+        <h1>TradeScope</h1>
+        <div class="tag">US market · live alerts</div>
+      </div>
+    </div>
+    <div class="htools">
+      <span class="pill"><span class="live-dot"></span><span id="status">Loading…</span></span>
+      <button class="btn" onclick="refreshAll()">↻ Refresh</button>
     </div>
   </div>
-  <div class="htools">
-    <span class="pill"><span class="live-dot"></span><span id="status">Loading…</span></span>
-    <button class="btn" onclick="refreshAll()">↻ Refresh</button>
-  </div>
+  <nav class="tabs">
+    <button class="tab active" data-tab="stocks">📈 Stocks</button>
+    <button class="tab" data-tab="fno">🎯 F&amp;O</button>
+  </nav>
 </header>
 
 <div class="wrap">
+  <div id="tab-stocks" class="tabpane">
 
   <!-- Best trade hero -->
   <div id="besttrade"></div>
@@ -252,11 +265,15 @@
   </details>
   <div class="alerts" id="alerts" style="margin-top:14px"></div>
 
+  </div><!-- /tab-stocks -->
+
+  <div id="tab-fno" class="tabpane" style="display:none">
   <div class="sec">
     <h2>🎯 F&amp;O Radar — Calls &amp; Puts</h2>
     <div class="desc">A separate options engine, independent of the stock alerts: bullish setups → <b style="color:var(--green)">BUY CALL</b>, bearish setups → <b style="color:var(--red)">BUY PUT</b>. Ranked by trend + options flow. <span id="fnoinfo"></span></div>
   </div>
   <div class="alerts" id="fno-radar"></div>
+  </div><!-- /tab-fno -->
 
   <div class="disclaimer">
     ⚠️ <b>Disclaimer:</b> These are technical + AI signals from free market data — <b>NOT financial advice and NOT a profit guarantee.</b>
@@ -575,6 +592,26 @@ async function refreshAll(){
   try { await Promise.all([loadCharts(), loadAlerts(), loadBacktest(), loadFno()]); }
   catch(e){ document.getElementById("status").textContent = "Error: " + e.message; }
 }
+
+// ---- Tabs: Stocks / F&O ----
+function switchTab(name){
+  document.querySelectorAll(".tabpane").forEach(p => p.style.display = "none");
+  const pane = document.getElementById("tab-"+name);
+  if(pane) pane.style.display = "";
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
+  try { localStorage.setItem("ts_tab", name); } catch(_){}
+  // charts created while hidden have width 0 — refit when Stocks becomes visible
+  if(name === "stocks"){
+    setTimeout(() => {
+      for(const k in chartObjs){
+        const box = document.getElementById("chart-"+k);
+        if(box && chartObjs[k].chart) chartObjs[k].chart.applyOptions({ width: box.clientWidth });
+      }
+    }, 60);
+  }
+}
+document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => switchTab(t.dataset.tab)));
+switchTab((function(){ try { return localStorage.getItem("ts_tab"); } catch(_){ return null; } })() || "stocks");
 
 refreshAll();
 loadQuotes();
