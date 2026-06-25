@@ -332,7 +332,8 @@ async function loadAlerts(){
   if(info){
     const upd = data.updated ? new Date(data.updated).toLocaleTimeString() : "scanning…";
     const nxt = data.nextRefreshInSec != null ? ` · next refresh in ${Math.floor(data.nextRefreshInSec/60)}m ${data.nextRefreshInSec%60}s` : "";
-    info.textContent = `· scanned ${data.scanned||0} stocks · updated ${upd}${nxt}`;
+    const mkt = data.marketOpen === false ? " · 🌙 US market closed — Claude paused (showing last data)" : "";
+    info.textContent = `· scanned ${data.scanned||0} stocks · updated ${upd}${nxt}${mkt}`;
   }
   alertEntries = {};
   if(!data.alerts.length){

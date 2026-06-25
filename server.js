@@ -401,8 +401,28 @@ async function apiJSON(prompt, model, maxTokens) {
   } catch (_) { return null; }
 }
 
+// Only spend tokens while the US market is actually live (saves API/Max usage).
+const CLAUDE_MARKET_HOURS_ONLY = process.env.CLAUDE_MARKET_HOURS_ONLY !== "0";
+
+// US regular session: Mon–Fri 9:30–16:00 ET. DST handled via IANA tz; holidays not.
+function isUsMarketOpen() {
+  try {
+    const p = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", weekday: "short",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    }).formatToParts(new Date());
+    const g = (t) => (p.find((x) => x.type === t) || {}).value;
+    const wd = g("weekday");
+    if (wd === "Sat" || wd === "Sun") return false;
+    let hh = parseInt(g("hour"), 10); if (hh === 24) hh = 0;
+    const mins = hh * 60 + parseInt(g("minute"), 10);
+    return mins >= 570 && mins < 960; // 9:30 → 16:00 ET
+  } catch (_) { return true; }
+}
+
 // Router: prefer the FREE Max CLI on your PC; use the PAID API on a server/VPS.
 async function claudeJSON(prompt, opts = {}) {
+  if (CLAUDE_MARKET_HOURS_ONLY && !isUsMarketOpen()) return null; // market closed → no Claude
   const forceCli = process.env.ENABLE_CLAUDE === "1";
   if (anthropic && !forceCli) return apiJSON(prompt, opts.apiModel, opts.maxTokens);
   if (ENABLE_CLAUDE) return cliJSON(prompt, opts.cliModel, opts.timeoutMs);
@@ -608,6 +628,7 @@ app.get("/api/alerts", (req, res) => {
       : null,
     minScore: MIN_SCORE,
     scanned: alertsScanned,
+    marketOpen: isUsMarketOpen(),
     bestTrade,
     alerts: activeAlerts,
   });
