@@ -802,9 +802,14 @@ async function manageAlerts() {
   if (closed.length || (needTopUp && Date.now() - lastBackfillAt > BACKFILL_MS)) {
     await backfillAlerts();
   }
-  // F&O radar — independent throttled scan (every 60s in market hours, +1 warm on boot)
-  if (Date.now() - lastFnoScanAt > 60000 && (isUsMarketOpen() || lastFnoScanAt === 0)) {
+  // F&O radar — pause when the market is closed (clear stale ideas); otherwise
+  // scan every 60s in market hours (+1 warm scan on boot).
+  if (!isUsMarketOpen()) {
+    if (fnoIdeas.length) fnoIdeas = [];
+  } else if (Date.now() - lastFnoScanAt > 60000) {
     scanFno(); // fire and forget
+  } else if (lastFnoScanAt === 0) {
+    scanFno(); // one warm scan on boot
   }
 }
 

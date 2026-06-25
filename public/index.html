@@ -431,6 +431,10 @@ async function loadFno(){
     const data = await res.json();
     if(info) info.textContent = data.marketOpen===false ? "· 🌙 market closed" : `· ${(data.ideas||[]).length} ideas`;
     fnoLevels = {};
+    if(data.marketOpen === false){
+      root.innerHTML = `<div class="empty">🌙 US market is closed — F&amp;O Radar is paused. Fresh call/put ideas resume automatically when the market reopens (~7:00 PM IST, Mon–Fri).</div>`;
+      return;
+    }
     if(!data.ideas || !data.ideas.length){
       root.innerHTML = `<div class="empty">🔍 No high-confluence options idea right now — needs a decisive direction with options flow agreeing with the trend. New ones appear automatically.</div>`;
       return;
