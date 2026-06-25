@@ -53,6 +53,19 @@ cd /opt/tradescope
 npm install --omit=dev
 ```
 
+## 4b. Create the .env (the Finnhub key is NOT in the repo, by design)
+
+```bash
+cat > .env <<'EOF'
+FINNHUB_KEY=PASTE_YOUR_FINNHUB_KEY_HERE
+PORT=3000
+ENABLE_CLAUDE=0
+EOF
+```
+
+Use the same Finnhub key from your PC's local `.env` (free key from
+https://finnhub.io). Without this, the app still runs but live ticks are disabled.
+
 ## 5. Start it with pm2 (keeps it alive + auto-start on reboot)
 
 ```bash
