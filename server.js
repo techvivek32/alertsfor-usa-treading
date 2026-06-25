@@ -845,6 +845,8 @@ setInterval(refreshAlertSet, ALERT_REFRESH_MS);
 setTimeout(runBacktest, 8000);
 setInterval(runBacktest, 6 * 60 * 60 * 1000);
 
-app.listen(PORT, () => {
-  console.log(`US Market Alerts running at http://localhost:${PORT}`);
+// HOST=127.0.0.1 keeps the app private (behind nginx) on a shared server.
+const HOST = process.env.HOST || "0.0.0.0";
+app.listen(PORT, HOST, () => {
+  console.log(`US Market Alerts running at http://${HOST}:${PORT}`);
 });
