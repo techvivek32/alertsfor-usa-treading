@@ -802,8 +802,8 @@ async function manageAlerts() {
   if (closed.length || (needTopUp && Date.now() - lastBackfillAt > BACKFILL_MS)) {
     await backfillAlerts();
   }
-  // F&O radar — independent throttled scan (every 90s in market hours, +1 warm on boot)
-  if (Date.now() - lastFnoScanAt > 90000 && (isUsMarketOpen() || lastFnoScanAt === 0)) {
+  // F&O radar — independent throttled scan (every 60s in market hours, +1 warm on boot)
+  if (Date.now() - lastFnoScanAt > 60000 && (isUsMarketOpen() || lastFnoScanAt === 0)) {
     scanFno(); // fire and forget
   }
 }

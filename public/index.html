@@ -436,10 +436,12 @@ async function loadFno(){
     const res = await fetch("/api/fno");
     const data = await res.json();
     if(info) info.textContent = data.marketOpen===false ? "· 🌙 market closed" : `· ${(data.ideas||[]).length} ideas`;
+    fnoLevels = {};
     if(!data.ideas || !data.ideas.length){
       root.innerHTML = `<div class="empty">🔍 No high-confluence options idea right now — needs a decisive direction with options flow agreeing with the trend. New ones appear automatically.</div>`;
       return;
     }
+    data.ideas.forEach(i => { fnoLevels[i.symbol] = { dir: i.direction, ref: i.underlyingPrice, target: i.plan.targetRef, stop: i.plan.stopRef }; });
     root.innerHTML = data.ideas.map(renderFnoIdea).join("");
   }catch(_){}
 }
@@ -460,7 +462,7 @@ function renderFnoIdea(i){
     <div class="fno-meta">Breakeven $${fmt(c.breakeven)} (${c.breakevenPct>0?'+':''}${c.breakevenPct}%) · IV ${c.iv ?? '–'}% · Vol ${c.volume} / OI ${c.openInterest}</div>
     <div style="margin:8px 0"><span class="flow-badge ${flowClass}">Flow: ${i.flow}${i.pcr!=null?` (PCR ${i.pcr})`:''}</span></div>
     <div class="levels">
-      <div class="level entry"><div class="lbl">Stock now</div><div class="val num">${fmt(i.underlyingPrice)}</div></div>
+      <div class="level entry"><div class="lbl">Stock now <span style="color:var(--green)">●</span></div><div class="val num" id="fnonow-${i.symbol}">${fmt(i.underlyingPrice)}</div></div>
       <div class="level target"><div class="lbl">${isCall?'Target ▲':'Target ▼'}</div><div class="val num">${fmt(p.targetRef)}</div><div class="pct" style="color:${col}">${p.targetPct>0?'+':''}${p.targetPct}%</div></div>
       <div class="level stop"><div class="lbl">Stop</div><div class="val num">${fmt(p.stopRef)}</div><div class="pct" style="color:var(--muted)">${p.stopPct>0?'+':''}${p.stopPct}%</div></div>
     </div>
@@ -524,6 +526,7 @@ function renderFno(o){
 // Fast live prices — updates index numbers + ticker grid + alert "Now" every second
 const lastPrice = {};
 let alertLevels = {};
+let fnoLevels = {};
 async function loadQuotes(){
   try {
     const res = await fetch("/api/quotes");
@@ -555,6 +558,14 @@ async function loadQuotes(){
         const pct = Math.max(0, Math.min(100, ((q.price - lv.stop) / (lv.target - lv.stop)) * 100));
         dot.style.left = pct + "%";
         dot.style.borderColor = q.price >= lv.entry ? "var(--green)" : "var(--red)";
+      }
+      // live underlying price inside any F&O Radar card (green = moving our way)
+      const fnonow = document.getElementById("fnonow-"+q.symbol);
+      const fl = fnoLevels[q.symbol];
+      if(fnonow && fl && q.price != null){
+        fnonow.textContent = fmt(q.price);
+        const favorable = fl.dir === "CALL" ? q.price >= fl.ref : q.price <= fl.ref;
+        fnonow.className = "val num " + (favorable ? "chg-up" : "chg-down");
       }
       const id = "tile-"+q.symbol;
       let tile = document.getElementById(id);
@@ -616,7 +627,8 @@ switchTab((function(){ try { return localStorage.getItem("ts_tab"); } catch(_){ 
 refreshAll();
 loadQuotes();
 setInterval(refreshAll, 60000);
-setInterval(loadQuotes, 1000);
+setInterval(loadFno, 30000);   // refresh F&O ideas more often
+setInterval(loadQuotes, 1000); // live prices every second
 </script>
 </body>
 </html>
