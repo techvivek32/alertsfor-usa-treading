@@ -118,6 +118,21 @@
   .dir-put{ background:var(--red); color:#2a0808; }
   .fno-contract{ font-size:15px; font-weight:800; margin:10px 0 3px; }
   .fno-meta{ font-size:12px; color:var(--muted); margin-bottom:4px; }
+  .tbl-wrap{ overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .tbl{ width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--border);
+    border-radius:12px; overflow:hidden; box-shadow:var(--shadow); }
+  .tbl th{ text-align:left; font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em;
+    padding:11px 13px; background:var(--inset); border-bottom:1px solid var(--border); white-space:nowrap; }
+  .tbl td{ padding:11px 13px; border-bottom:1px solid var(--border); font-size:13.5px; white-space:nowrap; }
+  .tbl tbody tr:last-child td{ border-bottom:none; }
+  .tbl tbody tr:hover{ background:rgba(255,255,255,.02); }
+  .tbl .sym{ font-weight:800; font-size:15px; }
+  .bbtn{ border:none; cursor:pointer; font-weight:800; font-size:12px; padding:7px 15px; border-radius:8px;
+    transition:transform .1s; margin-right:5px; }
+  .bbtn:hover{ transform:translateY(-1px); }
+  .bbtn.buy{ background:var(--green); color:#042; }
+  .bbtn.sell{ background:var(--red); color:#2a0808; }
+  .bbtn.close{ background:var(--panel-2); color:var(--text); border:1px solid var(--border-2); }
   .alert .tf{ margin-left:auto; color:var(--muted); font-size:12px; }
   .score-row{ display:flex; align-items:center; gap:11px; margin:12px 0 4px; }
   .score-num{ font-size:24px; font-weight:900; min-width:62px; }
@@ -221,6 +236,7 @@
   <nav class="tabs">
     <button class="tab active" data-tab="stocks">📈 Stocks</button>
     <button class="tab" data-tab="fno">🎯 F&amp;O</button>
+    <button class="tab" data-tab="history">📜 History</button>
   </nav>
 </header>
 
@@ -244,20 +260,16 @@
 
   <div class="sec">
     <h2>🔔 Live Trade Alerts</h2>
-    <div class="desc">Up to 5 open setups, each tracked like a position — it stays until price hits its target ✅ or stop 🛑, then a fresh one takes its place. <span id="alertinfo"></span></div>
+    <div class="desc">Up to 5 live setups. <b>Entry</b> = buy price · <b style="color:var(--green)">Target</b> = sell for profit · <b style="color:var(--red)">SL</b> = stop / exit. Each stays until its target ✅ or stop 🛑 is hit, then a fresh one takes its place. <span id="alertinfo"></span></div>
   </div>
   <div class="closedstrip" id="closedstrip"></div>
-  <details class="help">
-    <summary>How to read an alert</summary>
-    <div class="legend">
-      <div><span class="k">Score</span> 0–100 setup quality (trend + momentum + volume + breakout). Higher = stronger.</div>
-      <div><span class="k">Entry</span> suggested buy price · <b style="color:var(--green)">Target</b> = sell for profit · <b style="color:var(--red)">Stop</b> = exit to limit loss.</div>
-      <div><span class="k">R:R</span> Risk:Reward — "1 : 1.67" means you risk 1 to make 1.67. Higher is better.</div>
-      <div><span class="k">RSI</span> momentum (50–70 = healthy, &gt;70 = overbought) · <span class="k" style="min-width:auto">ADX</span> trend strength (&gt;25 = strong).</div>
-      <div><span class="k">News</span> Claude's read on the latest headlines.</div>
-    </div>
-  </details>
-  <div class="alerts" id="alerts" style="margin-top:14px"></div>
+  <div id="alerts"></div>
+
+  <div class="sec">
+    <h2>💼 My Positions</h2>
+    <div class="desc">Tap <b style="color:var(--green)">Buy</b> or <b style="color:var(--red)">Sell</b> on an alert to open a paper position here. Live P/L updates every second; saved in your browser.</div>
+  </div>
+  <div id="positions"></div>
 
   </div><!-- /tab-stocks -->
 
@@ -268,6 +280,20 @@
   </div>
   <div class="alerts" id="fno-radar"></div>
   </div><!-- /tab-fno -->
+
+  <div id="tab-history" class="tabpane" style="display:none">
+  <div class="sec">
+    <h2>🔔 Alerts History</h2>
+    <div class="desc">Every alert that has resolved on its own — its outcome, result, and the time/date it opened and closed.</div>
+  </div>
+  <div id="alert-history"></div>
+
+  <div class="sec">
+    <h2>💼 Position History</h2>
+    <div class="desc">Your closed paper positions, with profit/loss and timestamps.</div>
+  </div>
+  <div id="position-history"></div>
+  </div><!-- /tab-history -->
 
   <div class="disclaimer">
     ⚠️ <b>Disclaimer:</b> These are technical + AI signals from free market data — <b>NOT financial advice and NOT a profit guarantee.</b>
@@ -377,49 +403,107 @@ async function loadAlerts(){
     }).join("");
   }
   alertLevels = {};
+  recordClosedAlerts(data.closed);
   if(!data.alerts.length){
-    root.innerHTML = `<div class="empty">😴 No quality <b>long</b> setup right now — the market may be broadly weak, or signals don't agree (trend + options flow + news).<br>That's by design: forcing weak longs is exactly how trades end up underwater. 👉 Check the <b>F&amp;O Radar</b> below for put ideas. New longs appear automatically.</div>`;
+    root.innerHTML = `<div class="empty">😴 No quality <b>long</b> setup right now — the market may be broadly weak, or signals don't agree (trend + options flow + news).<br>That's by design: forcing weak longs is exactly how trades end up underwater. 👉 Check the <b>F&amp;O</b> tab for put ideas. New longs appear automatically.</div>`;
     return;
   }
-  root.innerHTML = data.alerts.map(a => {
+  const rows = data.alerts.map(a => {
     alertLevels[a.symbol] = { entry:a.entry, target:a.target, stop:a.stop };
-    const entryPct = Math.max(0, Math.min(100, ((a.entry - a.stop) / (a.target - a.stop)) * 100));
     const col = a.score >= 75 ? "var(--green)" : a.score >= 60 ? "var(--gold)" : "var(--muted)";
-    return `
-    <div class="alert" style="border-left-color:${col}">
-      <div class="a-top"><span class="sym">${a.symbol}</span><span class="tag">BUY</span>
-        <span class="tf">${a.timeframe}</span></div>
-      <div class="score-row">
-        <div>
-          <span class="score-num num" style="color:${col}">${a.score}<span style="font-size:12px;color:var(--muted)">/100</span></span>
-          <div class="score-cap">setup score</div>
-        </div>
-        <div class="score-bar"><div class="score-fill" style="width:${a.score}%;background:${col}"></div></div>
-      </div>
-      <div class="nowline">Now: <span class="nowprice num" id="now-${a.symbol}">—</span></div>
-      <div class="levels">
-        <div class="level entry"><div class="lbl">Entry · buy</div><div class="val num">${fmt(a.entry)}</div></div>
-        <div class="level target"><div class="lbl">Target · sell</div><div class="val num">${fmt(a.target)}</div><div class="pct chg-up">${a.targetPct>0?'+':''}${a.targetPct}%</div></div>
-        <div class="level stop"><div class="lbl">Stop · exit</div><div class="val num">${fmt(a.stop)}</div><div class="pct chg-down">${a.stopPct}%</div></div>
-      </div>
-      <div class="rr">⚖️ Risk : Reward = 1 : ${a.riskReward}</div>
-      <div class="prog">
-        <div class="prog-track">
-          <div class="prog-entry" style="left:${entryPct}%"></div>
-          <div class="prog-dot" id="dot-${a.symbol}" style="left:${entryPct}%"></div>
-        </div>
-        <div class="prog-lbls"><span>🛑 ${fmt(a.stop)}</span><span>● now</span><span>${fmt(a.target)} 🎯</span></div>
-      </div>
-      <div class="metrics">
-        <span title="Momentum (RSI). 50–70 = healthy uptrend, above 70 = overbought">RSI <b>${a.rsi}</b></span>
-        <span title="Trend strength (ADX). Above 25 = strong trend">ADX <b>${a.adx}</b></span>
-        <span title="Recent volume vs its average. Above 1 = rising interest">Vol <b>${a.relVol}x</b></span>
-        <span title="Typical price move size (volatility)">Move <b>${a.atrPct}%</b></span>
-      </div>
-      <div class="reasons">${a.reasons.map(r=>`<span>${r}</span>`).join("")}</div>
-      ${renderNews(a.news)}
-    </div>`;
+    return `<tr>
+      <td><span class="sym">${a.symbol}</span></td>
+      <td style="color:${col};font-weight:800">${a.score}</td>
+      <td class="num">${fmt(a.entry)}</td>
+      <td class="num chg-up">${fmt(a.target)} <span style="font-size:11px;opacity:.8">${a.targetPct>0?'+':''}${a.targetPct}%</span></td>
+      <td class="num chg-down">${fmt(a.stop)} <span style="font-size:11px;opacity:.8">${a.stopPct}%</span></td>
+      <td class="num" id="trow-now-${a.symbol}">—</td>
+      <td><button class="bbtn buy" onclick="openPosition('${a.symbol}','LONG')">Buy</button><button class="bbtn sell" onclick="openPosition('${a.symbol}','SHORT')">Sell</button></td>
+    </tr>`;
   }).join("");
+  root.innerHTML = `<div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>Stock</th><th>Score</th><th>Entry</th><th>Target</th><th>SL</th><th>Now ●</th><th>Action</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+// ---- Paper trading + history (saved in your browser) ----
+function lsGet(k,d){ try{ const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); }catch(_){ return d; } }
+function lsSet(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(_){} }
+let positions = lsGet("ts_positions", []);
+let posHistory = lsGet("ts_pos_history", []);
+let alertHistory = lsGet("ts_alert_history", []);
+let posSeq = lsGet("ts_pos_seq", 0);
+
+function fmtDT(ts){ if(!ts) return "—"; const d = new Date(ts); return d.toLocaleDateString() + " " + d.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"}); }
+
+function openPosition(symbol, side){
+  const px = liveQuote[symbol];
+  if(px == null){ alert("No live price for " + symbol + " yet — try again in a moment."); return; }
+  const lv = alertLevels[symbol] || {};
+  positions.unshift({ id: ++posSeq, symbol, side, entry: +px.toFixed(2), target: lv.target ?? null, stop: lv.stop ?? null, openedAt: Date.now() });
+  lsSet("ts_positions", positions); lsSet("ts_pos_seq", posSeq);
+  renderPositions();
+}
+
+function closePosition(id){
+  const idx = positions.findIndex(p => p.id === id); if(idx < 0) return;
+  const p = positions[idx];
+  const px = liveQuote[p.symbol] ?? p.entry;
+  const pnl = p.side === "LONG" ? (px - p.entry)/p.entry*100 : (p.entry - px)/p.entry*100;
+  posHistory.unshift({ ...p, closePrice: +px.toFixed(2), pnlPct: +pnl.toFixed(2), closedAt: Date.now() });
+  positions.splice(idx, 1);
+  lsSet("ts_positions", positions); lsSet("ts_pos_history", posHistory.slice(0, 200));
+  renderPositions(); renderHistory();
+}
+
+function renderPositions(){
+  const root = document.getElementById("positions"); if(!root) return;
+  if(!positions.length){ root.innerHTML = `<div class="empty" style="padding:18px">No open positions yet. Tap <b style="color:var(--green)">Buy</b> or <b style="color:var(--red)">Sell</b> on an alert above to open one.</div>`; return; }
+  const rows = positions.map(p => `<tr>
+    <td><span class="sym">${p.symbol}</span></td>
+    <td><span class="dirbadge ${p.side==='LONG'?'dir-call':'dir-put'}">${p.side==='LONG'?'BUY':'SELL'}</span></td>
+    <td class="num">${fmt(p.entry)}</td>
+    <td class="num" id="pos-now-${p.id}">—</td>
+    <td class="num" id="pos-pl-${p.id}">—</td>
+    <td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td>
+    <td><button class="bbtn close" onclick="closePosition(${p.id})">Close</button></td>
+  </tr>`).join("");
+  root.innerHTML = `<div class="tbl-wrap"><table class="tbl">
+    <thead><tr><th>Stock</th><th>Side</th><th>Entry</th><th>Now</th><th>P/L</th><th>Opened</th><th></th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function recordClosedAlerts(closed){
+  if(!closed || !closed.length) return;
+  let added = false;
+  closed.forEach(c => {
+    const key = c.symbol + "@" + c.closedAt;
+    if(c.closedAt && !alertHistory.some(h => (h.symbol + "@" + h.closedAt) === key)){
+      alertHistory.unshift({ symbol:c.symbol, entry:c.entry, target:c.target, stop:c.stop, status:c.status, resultPct:c.resultPct, openedAt:c.openedAt, closedAt:c.closedAt });
+      added = true;
+    }
+  });
+  if(added){ alertHistory = alertHistory.slice(0, 300); lsSet("ts_alert_history", alertHistory); renderHistory(); }
+}
+
+function renderHistory(){
+  const ah = document.getElementById("alert-history");
+  if(ah){
+    ah.innerHTML = !alertHistory.length
+      ? `<div class="empty" style="padding:18px">No resolved alerts yet — they appear here once a live alert hits its target or stop.</div>`
+      : `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Stock</th><th>Entry</th><th>Target</th><th>SL</th><th>Outcome</th><th>Result</th><th>Opened</th><th>Closed</th></tr></thead><tbody>` +
+        alertHistory.map(h => {
+          const out = h.status==='target' ? '✅ Target' : h.status==='timeout' ? '⏱️ Timeout' : (h.resultPct>=0 ? '🔒 Locked' : '🛑 Stop');
+          return `<tr><td><span class="sym">${h.symbol}</span></td><td class="num">${fmt(h.entry)}</td><td class="num">${fmt(h.target)}</td><td class="num">${fmt(h.stop)}</td><td>${out}</td><td class="num ${h.resultPct>=0?'chg-up':'chg-down'}">${h.resultPct>=0?'+':''}${h.resultPct}%</td><td style="font-size:12px;color:var(--muted)">${fmtDT(h.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(h.closedAt)}</td></tr>`;
+        }).join("") + `</tbody></table></div>`;
+  }
+  const ph = document.getElementById("position-history");
+  if(ph){
+    ph.innerHTML = !posHistory.length
+      ? `<div class="empty" style="padding:18px">No closed positions yet.</div>`
+      : `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Stock</th><th>Side</th><th>Entry</th><th>Exit</th><th>P/L</th><th>Opened</th><th>Closed</th></tr></thead><tbody>` +
+        posHistory.map(p => `<tr><td><span class="sym">${p.symbol}</span></td><td>${p.side==='LONG'?'BUY':'SELL'}</td><td class="num">${fmt(p.entry)}</td><td class="num">${fmt(p.closePrice)}</td><td class="num ${p.pnlPct>=0?'chg-up':'chg-down'}">${p.pnlPct>=0?'+':''}${p.pnlPct}%</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.closedAt)}</td></tr>`).join("") + `</tbody></table></div>`;
+  }
 }
 
 async function loadFno(){
@@ -527,8 +611,9 @@ function renderFno(o){
   </div>`;
 }
 
-// Fast live prices — updates index numbers + ticker grid + alert "Now" every second
+// Fast live prices — updates index numbers + alert table "Now" + position P/L every second
 const lastPrice = {};
+const liveQuote = {};
 let alertLevels = {};
 let fnoLevels = {};
 async function loadQuotes(){
@@ -549,11 +634,13 @@ async function loadQuotes(){
         b.close = q.price; b.high = Math.max(b.high, q.price); b.low = Math.min(b.low, q.price);
         co.series.update(b);
       }
-      const nowEl = document.getElementById("now-"+q.symbol);
+      if(q.price != null) liveQuote[q.symbol] = q.price;
       const lv = alertLevels[q.symbol];
-      if(nowEl && q.price != null){
-        nowEl.textContent = fmt(q.price);
-        if(lv) nowEl.className = "nowprice num " + (q.price >= lv.entry ? "chg-up" : "chg-down");
+      // live "Now" column in the alerts table
+      const trow = document.getElementById("trow-now-"+q.symbol);
+      if(trow && q.price != null){
+        trow.textContent = fmt(q.price);
+        if(lv) trow.className = "num " + (q.price >= lv.entry ? "chg-up" : "chg-down");
       }
       // move the live "now" dot between stop (0%) and target (100%)
       const dot = document.getElementById("dot-"+q.symbol);
@@ -572,6 +659,18 @@ async function loadQuotes(){
       }
       if(q.live) liveCount++;
     });
+    // live P/L on open paper positions
+    positions.forEach(p => {
+      const px = liveQuote[p.symbol]; if(px == null) return;
+      const nowEl = document.getElementById("pos-now-"+p.id);
+      const plEl = document.getElementById("pos-pl-"+p.id);
+      if(nowEl) nowEl.textContent = fmt(px);
+      if(plEl){
+        const pnl = p.side === "LONG" ? (px - p.entry)/p.entry*100 : (p.entry - px)/p.entry*100;
+        plEl.textContent = (pnl>=0?"+":"") + pnl.toFixed(2) + "%";
+        plEl.className = "num " + (pnl>=0 ? "chg-up" : "chg-down");
+      }
+    });
     document.getElementById("status").textContent = `Live · ${liveCount} ticking · ${new Date().toLocaleTimeString()}`;
   } catch(_){}
 }
@@ -588,6 +687,7 @@ function switchTab(name){
   if(pane) pane.style.display = "";
   document.querySelectorAll(".tab").forEach(t => t.classList.toggle("active", t.dataset.tab === name));
   try { localStorage.setItem("ts_tab", name); } catch(_){}
+  if(name === "history") renderHistory();
   // charts created while hidden have width 0 — refit when Stocks becomes visible
   if(name === "stocks"){
     setTimeout(() => {
@@ -601,11 +701,14 @@ function switchTab(name){
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => switchTab(t.dataset.tab)));
 switchTab((function(){ try { return localStorage.getItem("ts_tab"); } catch(_){ return null; } })() || "stocks");
 
+renderPositions();
+renderHistory();
 refreshAll();
 loadQuotes();
 setInterval(refreshAll, 60000);
-setInterval(loadFno, 30000);   // refresh F&O ideas more often
-setInterval(loadQuotes, 1000); // live prices every second
+setInterval(loadAlerts, 20000); // refresh the alert table (resolved → replaced) faster
+setInterval(loadFno, 30000);    // refresh F&O ideas more often
+setInterval(loadQuotes, 1000);  // live prices every second
 </script>
 </body>
 </html>
