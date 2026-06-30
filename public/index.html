@@ -133,6 +133,9 @@
   .bbtn.buy{ background:var(--green); color:#042; }
   .bbtn.sell{ background:var(--red); color:#2a0808; }
   .bbtn.close{ background:var(--panel-2); color:var(--text); border:1px solid var(--border-2); }
+  .qty-in{ width:58px; padding:6px 8px; border-radius:8px; border:1px solid var(--border-2);
+    background:var(--inset); color:var(--text); font-size:13px; font-weight:700; margin-right:7px; }
+  .qty-in:focus{ outline:none; border-color:var(--accent); }
   .alert .tf{ margin-left:auto; color:var(--muted); font-size:12px; }
   .score-row{ display:flex; align-items:center; gap:11px; margin:12px 0 4px; }
   .score-num{ font-size:24px; font-weight:900; min-width:62px; }
@@ -421,7 +424,11 @@ async function loadAlerts(){
       <td class="num chg-up">${fmt(a.target)} <span style="font-size:11px;opacity:.8">${a.targetPct>0?'+':''}${a.targetPct}%</span></td>
       <td class="num chg-down">${fmt(a.stop)} <span style="font-size:11px;opacity:.8">${a.stopPct}%</span></td>
       <td class="num" id="trow-now-${a.symbol}">—</td>
-      <td><button class="bbtn buy" onclick="openPosition('${a.symbol}','LONG')">Buy</button><button class="bbtn sell" onclick="openPosition('${a.symbol}','SHORT')">Sell</button></td>
+      <td style="white-space:nowrap">
+        <input type="number" min="1" step="1" value="1" class="qty-in" id="qty-${a.symbol}" title="Quantity (shares)">
+        <button class="bbtn buy" onclick="openPosition('${a.symbol}','LONG')">Buy</button>
+        <button class="bbtn sell" onclick="openPosition('${a.symbol}','SHORT')">Sell</button>
+      </td>
     </tr>`;
   }).join("");
   root.innerHTML = `<div class="tbl-wrap"><table class="tbl">
@@ -483,8 +490,11 @@ function fmtDT(ts){ if(!ts) return "—"; const d = new Date(ts); return d.toLoc
 function openPosition(symbol, side){
   const px = liveQuote[symbol];
   if(px == null){ alert("No live price for " + symbol + " yet — try again in a moment."); return; }
+  const qtyEl = document.getElementById("qty-"+symbol);
+  let qty = qtyEl ? parseInt(qtyEl.value, 10) : 1;
+  if(!qty || qty < 1) qty = 1;
   const lv = alertLevels[symbol] || {};
-  positions.unshift({ id: ++posSeq, symbol, side, entry: +px.toFixed(2), target: lv.target ?? null, stop: lv.stop ?? null, openedAt: Date.now() });
+  positions.unshift({ id: ++posSeq, symbol, side, qty, entry: +px.toFixed(2), target: lv.target ?? null, stop: lv.stop ?? null, openedAt: Date.now() });
   lsSet("ts_positions", positions); lsSet("ts_pos_seq", posSeq);
   renderPositions();
 }
@@ -493,8 +503,10 @@ function closePosition(id){
   const idx = positions.findIndex(p => p.id === id); if(idx < 0) return;
   const p = positions[idx];
   const px = liveQuote[p.symbol] ?? p.entry;
-  const pnl = p.side === "LONG" ? (px - p.entry)/p.entry*100 : (p.entry - px)/p.entry*100;
-  posHistory.unshift({ ...p, closePrice: +px.toFixed(2), pnlPct: +pnl.toFixed(2), closedAt: Date.now() });
+  const diff = p.side === "LONG" ? (px - p.entry) : (p.entry - px);
+  const pnlPct = diff / p.entry * 100;
+  const pnlDol = diff * (p.qty || 1);
+  posHistory.unshift({ ...p, closePrice: +px.toFixed(2), pnlPct: +pnlPct.toFixed(2), pnlDol: +pnlDol.toFixed(2), closedAt: Date.now() });
   positions.splice(idx, 1);
   lsSet("ts_positions", positions); lsSet("ts_pos_history", posHistory.slice(0, 200));
   renderPositions(); renderHistory();
@@ -506,6 +518,7 @@ function renderPositions(){
   const rows = positions.map(p => `<tr>
     <td><span class="sym">${p.symbol}</span></td>
     <td><span class="dirbadge ${p.side==='LONG'?'dir-call':'dir-put'}">${p.side==='LONG'?'BUY':'SELL'}</span></td>
+    <td class="num">${p.qty || 1}</td>
     <td class="num">${fmt(p.entry)}</td>
     <td class="num" id="pos-now-${p.id}">—</td>
     <td class="num" id="pos-pl-${p.id}">—</td>
@@ -513,7 +526,7 @@ function renderPositions(){
     <td><button class="bbtn close" onclick="closePosition(${p.id})">Close</button></td>
   </tr>`).join("");
   root.innerHTML = `<div class="tbl-wrap"><table class="tbl">
-    <thead><tr><th>Stock</th><th>Side</th><th>Entry</th><th>Now</th><th>P/L</th><th>Opened</th><th></th></tr></thead>
+    <thead><tr><th>Stock</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P/L</th><th>Opened</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
 
@@ -545,8 +558,8 @@ function renderHistory(){
   if(ph){
     ph.innerHTML = !posHistory.length
       ? `<div class="empty" style="padding:18px">No closed positions yet.</div>`
-      : `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Stock</th><th>Side</th><th>Entry</th><th>Exit</th><th>P/L</th><th>Opened</th><th>Closed</th></tr></thead><tbody>` +
-        posHistory.map(p => `<tr><td><span class="sym">${p.symbol}</span></td><td>${p.side==='LONG'?'BUY':'SELL'}</td><td class="num">${fmt(p.entry)}</td><td class="num">${fmt(p.closePrice)}</td><td class="num ${p.pnlPct>=0?'chg-up':'chg-down'}">${p.pnlPct>=0?'+':''}${p.pnlPct}%</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.closedAt)}</td></tr>`).join("") + `</tbody></table></div>`;
+      : `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Stock</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P/L</th><th>Opened</th><th>Closed</th></tr></thead><tbody>` +
+        posHistory.map(p => `<tr><td><span class="sym">${p.symbol}</span></td><td>${p.side==='LONG'?'BUY':'SELL'}</td><td class="num">${p.qty||1}</td><td class="num">${fmt(p.entry)}</td><td class="num">${fmt(p.closePrice)}</td><td class="num ${p.pnlPct>=0?'chg-up':'chg-down'}">${p.pnlDol!=null?('$'+(p.pnlDol>=0?'+':'')+p.pnlDol+' '):''}(${p.pnlPct>=0?'+':''}${p.pnlPct}%)</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.closedAt)}</td></tr>`).join("") + `</tbody></table></div>`;
   }
 }
 
@@ -716,9 +729,11 @@ async function loadQuotes(){
       const plEl = document.getElementById("pos-pl-"+p.id);
       if(nowEl) nowEl.textContent = fmt(px);
       if(plEl){
-        const pnl = p.side === "LONG" ? (px - p.entry)/p.entry*100 : (p.entry - px)/p.entry*100;
-        plEl.textContent = (pnl>=0?"+":"") + pnl.toFixed(2) + "%";
-        plEl.className = "num " + (pnl>=0 ? "chg-up" : "chg-down");
+        const diff = p.side === "LONG" ? (px - p.entry) : (p.entry - px);
+        const pnlPct = diff / p.entry * 100;
+        const pnlDol = diff * (p.qty || 1);
+        plEl.innerHTML = `$${pnlDol>=0?'+':''}${pnlDol.toFixed(2)} <span style="font-size:11px;opacity:.85">(${pnlPct>=0?'+':''}${pnlPct.toFixed(2)}%)</span>`;
+        plEl.className = "num " + (diff>=0 ? "chg-up" : "chg-down");
       }
     });
     document.getElementById("status").textContent = `Live · ${liveCount} ticking · ${new Date().toLocaleTimeString()}`;
