@@ -243,8 +243,22 @@
 <div class="wrap">
   <div id="tab-stocks" class="tabpane">
 
-  <!-- Best trade hero -->
-  <div id="besttrade"></div>
+  <div class="sec">
+    <h2>🔔 Live Trade Alerts</h2>
+    <div class="desc">Up to 5 live setups. <b>Entry</b> = buy price · <b style="color:var(--green)">Target</b> = sell for profit · <b style="color:var(--red)">SL</b> = stop / exit. Each stays until its target ✅ or stop 🛑 is hit, then a fresh one takes its place. <span id="alertinfo"></span></div>
+  </div>
+  <div class="closedstrip" id="closedstrip"></div>
+  <div id="alerts"></div>
+  <div class="alerts" id="alert-cards" style="margin-top:16px"></div>
+
+  <div class="sec">
+    <h2>💼 My Positions</h2>
+    <div class="desc">Tap <b style="color:var(--green)">Buy</b> or <b style="color:var(--red)">Sell</b> on an alert to open a paper position here. Live P/L updates every second; saved in your browser.</div>
+  </div>
+  <div id="positions"></div>
+
+  <!-- Claude's best trade (moved below the alerts) -->
+  <div id="besttrade" style="margin-top:8px"></div>
 
   <div class="sec">
     <h2>📈 Live Index Charts</h2>
@@ -257,19 +271,6 @@
     <div class="desc">The honest scoreboard — this strategy tested on ~400 days of real history. No hype, just numbers.</div>
   </div>
   <div id="backtest"></div>
-
-  <div class="sec">
-    <h2>🔔 Live Trade Alerts</h2>
-    <div class="desc">Up to 5 live setups. <b>Entry</b> = buy price · <b style="color:var(--green)">Target</b> = sell for profit · <b style="color:var(--red)">SL</b> = stop / exit. Each stays until its target ✅ or stop 🛑 is hit, then a fresh one takes its place. <span id="alertinfo"></span></div>
-  </div>
-  <div class="closedstrip" id="closedstrip"></div>
-  <div id="alerts"></div>
-
-  <div class="sec">
-    <h2>💼 My Positions</h2>
-    <div class="desc">Tap <b style="color:var(--green)">Buy</b> or <b style="color:var(--red)">Sell</b> on an alert to open a paper position here. Live P/L updates every second; saved in your browser.</div>
-  </div>
-  <div id="positions"></div>
 
   </div><!-- /tab-stocks -->
 
@@ -404,8 +405,10 @@ async function loadAlerts(){
   }
   alertLevels = {};
   recordClosedAlerts(data.closed);
+  const cardsRoot = document.getElementById("alert-cards");
   if(!data.alerts.length){
     root.innerHTML = `<div class="empty">😴 No quality <b>long</b> setup right now — the market may be broadly weak, or signals don't agree (trend + options flow + news).<br>That's by design: forcing weak longs is exactly how trades end up underwater. 👉 Check the <b>F&amp;O</b> tab for put ideas. New longs appear automatically.</div>`;
+    if(cardsRoot) cardsRoot.innerHTML = "";
     return;
   }
   const rows = data.alerts.map(a => {
@@ -424,6 +427,47 @@ async function loadAlerts(){
   root.innerHTML = `<div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>Stock</th><th>Score</th><th>Entry</th><th>Target</th><th>SL</th><th>Now ●</th><th>Action</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
+  // detailed cards below the table
+  if(cardsRoot) cardsRoot.innerHTML = data.alerts.map(renderAlertCard).join("");
+}
+
+function renderAlertCard(a){
+  const col = a.score >= 75 ? "var(--green)" : a.score >= 60 ? "var(--gold)" : "var(--muted)";
+  const entryPct = Math.max(0, Math.min(100, ((a.entry - a.stop) / (a.target - a.stop)) * 100));
+  return `
+  <div class="alert" style="border-left-color:${col}">
+    <div class="a-top"><span class="sym">${a.symbol}</span><span class="tag">BUY</span>
+      <span class="tf">${a.timeframe}</span></div>
+    <div class="score-row">
+      <div>
+        <span class="score-num num" style="color:${col}">${a.score}<span style="font-size:12px;color:var(--muted)">/100</span></span>
+        <div class="score-cap">setup score</div>
+      </div>
+      <div class="score-bar"><div class="score-fill" style="width:${Math.min(a.score,100)}%;background:${col}"></div></div>
+    </div>
+    <div class="nowline">Now: <span class="nowprice num" id="now-${a.symbol}">—</span></div>
+    <div class="levels">
+      <div class="level entry"><div class="lbl">Entry · buy</div><div class="val num">${fmt(a.entry)}</div></div>
+      <div class="level target"><div class="lbl">Target · sell</div><div class="val num">${fmt(a.target)}</div><div class="pct chg-up">${a.targetPct>0?'+':''}${a.targetPct}%</div></div>
+      <div class="level stop"><div class="lbl">SL · exit</div><div class="val num">${fmt(a.stop)}</div><div class="pct chg-down">${a.stopPct}%</div></div>
+    </div>
+    <div class="rr">⚖️ Risk : Reward = 1 : ${a.riskReward}</div>
+    <div class="prog">
+      <div class="prog-track">
+        <div class="prog-entry" style="left:${entryPct}%"></div>
+        <div class="prog-dot" id="dot-${a.symbol}" style="left:${entryPct}%"></div>
+      </div>
+      <div class="prog-lbls"><span>🛑 ${fmt(a.stop)}</span><span>● now</span><span>${fmt(a.target)} 🎯</span></div>
+    </div>
+    <div class="metrics">
+      <span title="Momentum (RSI). 50–70 = healthy uptrend, above 70 = overbought">RSI <b>${a.rsi}</b></span>
+      <span title="Trend strength (ADX). Above 25 = strong trend">ADX <b>${a.adx}</b></span>
+      <span title="Recent volume vs its average. Above 1 = rising interest">Vol <b>${a.relVol}x</b></span>
+      <span title="Typical price move size (volatility)">Move <b>${a.atrPct}%</b></span>
+    </div>
+    <div class="reasons">${a.reasons.map(r=>`<span>${r}</span>`).join("")}</div>
+    ${renderNews(a.news)}
+  </div>`;
 }
 
 // ---- Paper trading + history (saved in your browser) ----
@@ -641,6 +685,12 @@ async function loadQuotes(){
       if(trow && q.price != null){
         trow.textContent = fmt(q.price);
         if(lv) trow.className = "num " + (q.price >= lv.entry ? "chg-up" : "chg-down");
+      }
+      // live "Now" inside the detailed card
+      const nowEl = document.getElementById("now-"+q.symbol);
+      if(nowEl && q.price != null){
+        nowEl.textContent = fmt(q.price);
+        if(lv) nowEl.className = "nowprice num " + (q.price >= lv.entry ? "chg-up" : "chg-down");
       }
       // move the live "now" dot between stop (0%) and target (100%)
       const dot = document.getElementById("dot-"+q.symbol);
