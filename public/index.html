@@ -454,8 +454,14 @@ function renderFnoIdea(i){
   return `
   <div class="alert" style="border-left-color:${col}">
     <div class="a-top"><span class="sym">${i.symbol}</span>
-      <span class="dirbadge ${isCall?'dir-call':'dir-put'}">${isCall?'BUY CALL':'BUY PUT'}</span>
-      <span class="tf">score ${i.score}</span></div>
+      <span class="dirbadge ${isCall?'dir-call':'dir-put'}">${isCall?'BUY CALL':'BUY PUT'}</span></div>
+    <div class="score-row">
+      <div>
+        <span class="score-num num" style="color:${col}">${i.score}<span style="font-size:12px;color:var(--muted)">/100</span></span>
+        <div class="score-cap">setup score</div>
+      </div>
+      <div class="score-bar"><div class="score-fill" style="width:${Math.min(i.score,100)}%;background:${col}"></div></div>
+    </div>
     <div class="fno-contract">📑 ${c.expiry} · $${c.strike} ${c.type} @ $${fmt(c.premium)}</div>
     <div class="fno-meta">Breakeven $${fmt(c.breakeven)} (${c.breakevenPct>0?'+':''}${c.breakevenPct}%) · IV ${c.iv ?? '–'}% · Vol ${c.volume} / OI ${c.openInterest}</div>
     <div style="margin:8px 0"><span class="flow-badge ${flowClass}">Flow: ${i.flow}${i.pcr!=null?` (PCR ${i.pcr})`:''}</span></div>
