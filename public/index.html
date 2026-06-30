@@ -536,14 +536,16 @@ function openPosition(symbol, side){
 
 // Open an F&O paper position (CALL = bullish on underlying, PUT = bearish).
 // P/L is tracked on the live underlying (option premiums aren't live).
-function openFnoPosition(symbol, optType, strike, expiry, premium){
+function openFnoPosition(symbol, optType, strike, expiry, premium, action){
   const px = liveQuote[symbol];
   if(px == null){ alert("No live price for " + symbol + " yet — try again in a moment."); return; }
   const qtyEl = document.getElementById("fqty-"+symbol);
   let qty = qtyEl ? parseInt(qtyEl.value, 10) : 1;
   if(!qty || qty < 1) qty = 1;
-  const side = optType === "CALL" ? "LONG" : "SHORT";
-  positions.unshift({ id: ++posSeq, kind: "FNO", symbol, side, optType, strike, expiry, premium, qty, entry: +px.toFixed(2), openedAt: Date.now() });
+  action = action || "BUY";
+  // side = profit direction on the underlying: buy call / sell put = LONG; sell call / buy put = SHORT
+  const side = optType === "CALL" ? (action === "BUY" ? "LONG" : "SHORT") : (action === "BUY" ? "SHORT" : "LONG");
+  positions.unshift({ id: ++posSeq, kind: "FNO", symbol, side, action, optType, strike, expiry, premium, qty, entry: +px.toFixed(2), openedAt: Date.now() });
   lsSet("ts_positions", positions); lsSet("ts_pos_seq", posSeq);
   renderPositions();
 }
@@ -569,7 +571,7 @@ function posTableHtml(list, emptyMsg){
       ? `<span class="sym">${p.symbol}</span> <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optType==='CALL'?'C':'P'} ${(p.expiry||'').slice(5)}</span>`
       : `<span class="sym">${p.symbol}</span>`;
     const badge = fno
-      ? `<span class="dirbadge ${p.optType==='CALL'?'dir-call':'dir-put'}">${p.optType}</span>`
+      ? `<span class="dirbadge ${p.side==='LONG'?'dir-call':'dir-put'}">${p.action||'BUY'} ${p.optType}</span>`
       : `<span class="dirbadge ${p.side==='LONG'?'dir-call':'dir-put'}">${p.side==='LONG'?'BUY':'SELL'}</span>`;
     return `<tr>
       <td>${label}</td>
@@ -623,7 +625,7 @@ function renderHistory(){
   const histRow = p => {
     const fno = p.kind === "FNO";
     const label = fno ? `<span class="sym">${p.symbol}</span> <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optType==='CALL'?'C':'P'}</span>` : `<span class="sym">${p.symbol}</span>`;
-    const side = fno ? p.optType : (p.side==='LONG'?'BUY':'SELL');
+    const side = fno ? `${p.action||'BUY'} ${p.optType}` : (p.side==='LONG'?'BUY':'SELL');
     return `<tr><td>${label}</td><td>${side}</td><td class="num">${p.qty||1}</td><td class="num">${fmt(p.entry)}</td><td class="num">${fmt(p.closePrice)}</td><td class="num ${p.pnlPct>=0?'chg-up':'chg-down'}">${p.pnlDol!=null?('$'+(p.pnlDol>=0?'+':'')+p.pnlDol+' '):''}(${p.pnlPct>=0?'+':''}${p.pnlPct}%)</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.closedAt)}</td></tr>`;
   };
   const histTable = (list, empty) => !list.length
@@ -693,9 +695,10 @@ function renderFnoIdea(i){
     <div class="rr">⚖️ underlying Risk:Reward = 1 : ${p.riskReward}</div>
     <div class="reasons">${i.reasons.map(r=>`<span>${r}</span>`).join("")}</div>
     ${unusual}
-    <div style="margin-top:12px;display:flex;align-items:center;gap:2px">
+    <div style="margin-top:12px;display:flex;align-items:center;gap:2px;flex-wrap:wrap">
       <input type="number" min="1" step="1" value="1" class="qty-in" id="fqty-${i.symbol}" title="Contracts">
-      <button class="bbtn ${isCall?'buy':'sell'}" onclick="openFnoPosition('${i.symbol}','${i.direction}',${c.strike},'${c.expiry}',${c.premium})">${isCall?'Buy CALL':'Buy PUT'}</button>
+      <button class="bbtn ${isCall?'buy':'sell'}" onclick="openFnoPosition('${i.symbol}','${i.direction}',${c.strike},'${c.expiry}',${c.premium},'BUY')">${isCall?'Buy CALL':'Buy PUT'}</button>
+      <button class="bbtn ${isCall?'sell':'buy'}" onclick="openFnoPosition('${i.symbol}','${i.direction}',${c.strike},'${c.expiry}',${c.premium},'SELL')">${isCall?'Sell CALL':'Sell PUT'}</button>
     </div>
   </div>`;
 }
