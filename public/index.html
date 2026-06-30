@@ -499,14 +499,28 @@ function openPosition(symbol, side){
   renderPositions();
 }
 
+// Open an F&O paper position (CALL = bullish on underlying, PUT = bearish).
+// P/L is tracked on the live underlying (option premiums aren't live).
+function openFnoPosition(symbol, optType, strike, expiry, premium){
+  const px = liveQuote[symbol];
+  if(px == null){ alert("No live price for " + symbol + " yet — try again in a moment."); return; }
+  const qtyEl = document.getElementById("fqty-"+symbol);
+  let qty = qtyEl ? parseInt(qtyEl.value, 10) : 1;
+  if(!qty || qty < 1) qty = 1;
+  const side = optType === "CALL" ? "LONG" : "SHORT";
+  positions.unshift({ id: ++posSeq, kind: "FNO", symbol, side, optType, strike, expiry, premium, qty, entry: +px.toFixed(2), openedAt: Date.now() });
+  lsSet("ts_positions", positions); lsSet("ts_pos_seq", posSeq);
+  renderPositions();
+}
+
 function closePosition(id){
   const idx = positions.findIndex(p => p.id === id); if(idx < 0) return;
   const p = positions[idx];
   const px = liveQuote[p.symbol] ?? p.entry;
   const diff = p.side === "LONG" ? (px - p.entry) : (p.entry - px);
   const pnlPct = diff / p.entry * 100;
-  const pnlDol = diff * (p.qty || 1);
-  posHistory.unshift({ ...p, closePrice: +px.toFixed(2), pnlPct: +pnlPct.toFixed(2), pnlDol: +pnlDol.toFixed(2), closedAt: Date.now() });
+  const pnlDol = p.kind === "FNO" ? null : diff * (p.qty || 1);
+  posHistory.unshift({ ...p, closePrice: +px.toFixed(2), pnlPct: +pnlPct.toFixed(2), pnlDol: pnlDol != null ? +pnlDol.toFixed(2) : null, closedAt: Date.now() });
   positions.splice(idx, 1);
   lsSet("ts_positions", positions); lsSet("ts_pos_history", posHistory.slice(0, 200));
   renderPositions(); renderHistory();
@@ -515,16 +529,25 @@ function closePosition(id){
 function renderPositions(){
   const root = document.getElementById("positions"); if(!root) return;
   if(!positions.length){ root.innerHTML = `<div class="empty" style="padding:18px">No open positions yet. Tap <b style="color:var(--green)">Buy</b> or <b style="color:var(--red)">Sell</b> on an alert above to open one.</div>`; return; }
-  const rows = positions.map(p => `<tr>
-    <td><span class="sym">${p.symbol}</span></td>
-    <td><span class="dirbadge ${p.side==='LONG'?'dir-call':'dir-put'}">${p.side==='LONG'?'BUY':'SELL'}</span></td>
-    <td class="num">${p.qty || 1}</td>
-    <td class="num">${fmt(p.entry)}</td>
-    <td class="num" id="pos-now-${p.id}">—</td>
-    <td class="num" id="pos-pl-${p.id}">—</td>
-    <td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td>
-    <td><button class="bbtn close" onclick="closePosition(${p.id})">Close</button></td>
-  </tr>`).join("");
+  const rows = positions.map(p => {
+    const fno = p.kind === "FNO";
+    const label = fno
+      ? `<span class="sym">${p.symbol}</span> <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optType==='CALL'?'C':'P'} ${(p.expiry||'').slice(5)}</span>`
+      : `<span class="sym">${p.symbol}</span>`;
+    const badge = fno
+      ? `<span class="dirbadge ${p.optType==='CALL'?'dir-call':'dir-put'}">${p.optType}</span>`
+      : `<span class="dirbadge ${p.side==='LONG'?'dir-call':'dir-put'}">${p.side==='LONG'?'BUY':'SELL'}</span>`;
+    return `<tr>
+      <td>${label}</td>
+      <td>${badge}</td>
+      <td class="num">${p.qty || 1}</td>
+      <td class="num">${fmt(p.entry)}</td>
+      <td class="num" id="pos-now-${p.id}">—</td>
+      <td class="num" id="pos-pl-${p.id}">—</td>
+      <td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td>
+      <td><button class="bbtn close" onclick="closePosition(${p.id})">Close</button></td>
+    </tr>`;
+  }).join("");
   root.innerHTML = `<div class="tbl-wrap"><table class="tbl">
     <thead><tr><th>Stock</th><th>Side</th><th>Qty</th><th>Entry</th><th>Now</th><th>P/L</th><th>Opened</th><th></th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
@@ -559,7 +582,12 @@ function renderHistory(){
     ph.innerHTML = !posHistory.length
       ? `<div class="empty" style="padding:18px">No closed positions yet.</div>`
       : `<div class="tbl-wrap"><table class="tbl"><thead><tr><th>Stock</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>P/L</th><th>Opened</th><th>Closed</th></tr></thead><tbody>` +
-        posHistory.map(p => `<tr><td><span class="sym">${p.symbol}</span></td><td>${p.side==='LONG'?'BUY':'SELL'}</td><td class="num">${p.qty||1}</td><td class="num">${fmt(p.entry)}</td><td class="num">${fmt(p.closePrice)}</td><td class="num ${p.pnlPct>=0?'chg-up':'chg-down'}">${p.pnlDol!=null?('$'+(p.pnlDol>=0?'+':'')+p.pnlDol+' '):''}(${p.pnlPct>=0?'+':''}${p.pnlPct}%)</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.closedAt)}</td></tr>`).join("") + `</tbody></table></div>`;
+        posHistory.map(p => {
+          const fno = p.kind === "FNO";
+          const label = fno ? `<span class="sym">${p.symbol}</span> <span style="font-size:11px;color:var(--muted)">$${p.strike}${p.optType==='CALL'?'C':'P'}</span>` : `<span class="sym">${p.symbol}</span>`;
+          const side = fno ? p.optType : (p.side==='LONG'?'BUY':'SELL');
+          return `<tr><td>${label}</td><td>${side}</td><td class="num">${p.qty||1}</td><td class="num">${fmt(p.entry)}</td><td class="num">${fmt(p.closePrice)}</td><td class="num ${p.pnlPct>=0?'chg-up':'chg-down'}">${p.pnlDol!=null?('$'+(p.pnlDol>=0?'+':'')+p.pnlDol+' '):''}(${p.pnlPct>=0?'+':''}${p.pnlPct}%)</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.openedAt)}</td><td style="font-size:12px;color:var(--muted)">${fmtDT(p.closedAt)}</td></tr>`;
+        }).join("") + `</tbody></table></div>`;
   }
 }
 
@@ -614,6 +642,10 @@ function renderFnoIdea(i){
     <div class="rr">⚖️ underlying Risk:Reward = 1 : ${p.riskReward}</div>
     <div class="reasons">${i.reasons.map(r=>`<span>${r}</span>`).join("")}</div>
     ${unusual}
+    <div style="margin-top:12px;display:flex;align-items:center;gap:2px">
+      <input type="number" min="1" step="1" value="1" class="qty-in" id="fqty-${i.symbol}" title="Contracts">
+      <button class="bbtn ${isCall?'buy':'sell'}" onclick="openFnoPosition('${i.symbol}','${i.direction}',${c.strike},'${c.expiry}',${c.premium})">${isCall?'Buy CALL':'Buy PUT'}</button>
+    </div>
   </div>`;
 }
 
@@ -731,8 +763,12 @@ async function loadQuotes(){
       if(plEl){
         const diff = p.side === "LONG" ? (px - p.entry) : (p.entry - px);
         const pnlPct = diff / p.entry * 100;
-        const pnlDol = diff * (p.qty || 1);
-        plEl.innerHTML = `$${pnlDol>=0?'+':''}${pnlDol.toFixed(2)} <span style="font-size:11px;opacity:.85">(${pnlPct>=0?'+':''}${pnlPct.toFixed(2)}%)</span>`;
+        if(p.kind === "FNO"){
+          plEl.innerHTML = `${pnlPct>=0?'+':''}${pnlPct.toFixed(2)}% <span style="font-size:11px;opacity:.7">underlying</span>`;
+        } else {
+          const pnlDol = diff * (p.qty || 1);
+          plEl.innerHTML = `$${pnlDol>=0?'+':''}${pnlDol.toFixed(2)} <span style="font-size:11px;opacity:.85">(${pnlPct>=0?'+':''}${pnlPct.toFixed(2)}%)</span>`;
+        }
         plEl.className = "num " + (diff>=0 ? "chg-up" : "chg-down");
       }
     });
